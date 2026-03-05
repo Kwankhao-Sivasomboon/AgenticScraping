@@ -1,0 +1,25 @@
+# Exclude secrets during build (will be passed as volumes or environment variables later)
+.env
+credentials.json
+playwright_state.json
+
+# Exclude Git files
+.git
+.gitignore
+
+# Exclude Python artifacts
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env
+venv
+.venv
+
+# Exclude local configs/logs
+*.log
+.DS_Store
+README.md
+Dockerfile
+.dockerignore

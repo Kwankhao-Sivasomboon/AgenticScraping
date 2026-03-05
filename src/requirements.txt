@@ -1,0 +1,7 @@
+playwright
+playwright-stealth
+gspread
+google-auth
+google-generativeai
+python-dotenv
+firebase-admin
