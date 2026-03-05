@@ -1,8 +1,8 @@
 from datetime import datetime
-from sheets_service import SheetsService
-from scraper_agent import ScraperAgent
-from evaluator_agent import EvaluatorAgent
-from firestore_service import FirestoreService
+from src.sheets_service import SheetsService
+from src.scraper_agent import ScraperAgent
+from src.evaluator_agent import EvaluatorAgent
+from src.firestore_service import FirestoreService
 
 def main():
     print("=== Starting Agentic AI Scraping Workflow (Detailed Hybrid) ===")
