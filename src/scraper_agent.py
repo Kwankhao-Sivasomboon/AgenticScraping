@@ -25,10 +25,15 @@ class ScraperAgent:
         """Close any annoying promotional banners blocking the screen."""
         try:
             print("Checking for blocking banners...")
-            # Safely click just the ad close buttons without destroying the modal framework
+            # Safely click just the ad close buttons and hide pure ad containers
             page.evaluate("""
-                var closeBtns = document.querySelectorAll('.btn-close[data-dismiss="modal"], .btn-close[onclick*="closeBanner"], a[onclick*="closeBannerAcceptAgent"]');
+                var closeBtns = document.querySelectorAll('.btn-close[data-dismiss="modal"], .btn-close[onclick*="closeBanner"], a[onclick*="closeBannerAcceptAgent"], .close[data-dismiss="modal"], button.close, #popup-close');
                 closeBtns.forEach(btn => btn.click());
+                
+                var ads = document.querySelectorAll('#ads-banner, #myModalIntro');
+                ads.forEach(el => {
+                    el.style.setProperty('display', 'none', 'important');
+                });
             """)
             self.random_sleep(1, 2)
         except Exception as e:
@@ -326,33 +331,74 @@ class ScraperAgent:
                         pass
                         
                     try:
-                        # Check for LINE icon
+                        # Check for LINE icon and extract the full href link
                         line_icon = detail_page.locator('img[src*="icon-line-new-design.svg"], img[alt="line"]').first
                         if line_icon.is_visible():
-                            contact_icon_text.append("Line_Icon: Available")
-                    except:
+                            parent_a = line_icon.locator('xpath=./parent::a')
+                            line_link = "Available"
+                            if parent_a.count() > 0:
+                                href = parent_a.get_attribute('href')
+                                if href:
+                                    line_link = href
+                            contact_icon_text.append(f"Line_URL: {line_link}")
+                    except Exception as e:
                         pass
                         
                     contact_icon_str = ", ".join(contact_icon_text) if contact_icon_text else "None"
                     # ----------------------------------------
                     
+                    # Reveal phone number in text if exists
+                    try:
+                        phone_reveal_btn = detail_page.locator('.p-phone-contact').first
+                        if phone_reveal_btn.is_visible():
+                            phone_reveal_btn.click(force=True)
+                            self.random_sleep(1, 1.5)
+                    except:
+                        pass
+                    
                     # Extract raw text
                     raw_text = detail_page.evaluate("document.body.innerText")
-                    
-                    # Extract Images URL
-                    images = detail_page.query_selector_all('img')
+                    # --- Extract All Images ---
                     image_urls = []
-                    for img in images:
-                        src = img.get_attribute('src')
-                        if src and 'http' in src and 'upload' in src: # Filter only uploaded property images mostly
-                            image_urls.append(src)
+                    try:
+                        # Check if "Show all pictures" button exists
+                        more_pic_btn = detail_page.locator('.more_data_detail .box_relative, .icon_more_data').first
+                        if more_pic_btn.is_visible():
+                            print("Found 'Show all pictures' button, clicking to load gallery...")
+                            more_pic_btn.click(force=True)
+                            detail_page.wait_for_selector('.lg-thumb-item img', timeout=5000)
+                            self.random_sleep(1, 2)
+                            
+                            # Extract all thumbnails from the gallery modal
+                            gallery_imgs = detail_page.locator('.lg-thumb-item img')
+                            for i in range(gallery_imgs.count()):
+                                src = gallery_imgs.nth(i).get_attribute('src')
+                                if src and 'http' in src and 'upload' in src:
+                                    image_urls.append(src)
+                                    
+                            # Close the gallery modal with Escape or close button
+                            detail_page.keyboard.press('Escape')
+                            self.random_sleep(0.5, 1)
+                    except Exception as e:
+                        print("Gallery not found or failed, falling back to standard extraction.")
+
+                    # Fallback or additional standard extraction if gallery wasn't clicked
+                    if not image_urls:
+                        images = detail_page.query_selector_all('img')
+                        for img in images:
+                            src = img.get_attribute('src')
+                            if src and 'http' in src and 'upload' in src and 'contact' not in src:
+                                image_urls.append(src)
+                                
+                    # Remove duplicates while preserving order
+                    image_urls = list(dict.fromkeys(image_urls))
                     
                     detail_page.close()
                     
                     results.append({
                         "listing_id": listing_id,
                         "url": url,
-                        "images": image_urls[:5], # Keep top 5 images
+                        "images": image_urls[:10], # Keep up to 10 images
                         "raw_text": raw_text[:5000], # Send first 5000 chars to Gemini
                         "contact_icon": contact_icon_str
                     })
