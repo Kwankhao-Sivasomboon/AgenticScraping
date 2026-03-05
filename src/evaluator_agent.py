@@ -1,6 +1,7 @@
 import os
 import json
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -11,13 +12,14 @@ class EvaluatorAgent:
         if not api_key:
             raise ValueError("GOOGLE_API_KEY is not set in environment variables.")
         
-        genai.configure(api_key=api_key)
-        # Using Gemini 1.5 Flash - fast and supports multi-modal if needed later
-        self.model = genai.GenerativeModel('gemini-1.5-flash')
+        # New genai client initialization
+        self.client = genai.Client(api_key=api_key)
+        # Using Gemini 2.5 Flash
+        self.model_name = 'gemini-2.5-flash'
         
     def evaluate_listing(self, parsed_data):
         """
-        Intelligence Phase: One-Shot Analysis using Gemini 1.5 Flash
+        Intelligence Phase: One-Shot Analysis using Gemini 2.5 Flash
         Receives raw_text and images, extracts details based on user requirements.
         """
         print(f"Evaluating listing ID: {parsed_data.get('listing_id', 'Unknown')}")
@@ -27,7 +29,8 @@ class EvaluatorAgent:
         
         โปรดสกัดข้อมูลต่อไปนี้:
         1. "customer_name": ชื่อผู้ลงประกาศ (Owner/Agent) ถ้าไม่พบให้ใส่ "Unknown"
-        2. "phone_number": เบอร์โทรศัพท์ ถ้ามีหลายเบอร์คั่นด้วยคอมม่า ถ้าไม่พบใส่ "Unknown"
+        2. "phone_number": เบอร์โทรศัพท์ ถ้ามีหลายเบอร์คั่นด้วยคอมม่า 
+           **เงื่อนไขสำคัญ**: ให้หาจาก "ข้อความดิบ" ก่อน (มักจะตามหลังคำว่า สนใจติดต่อ, โทร, 📞) เช่น "081~651~3612" ให้ลบสัญลักษณ์แปลงให้เป็นรูปแบบปกติ (081-651-3612) ถ้าในข้อความ "ไม่มีเบอร์" ให้ดึงค่าจาก "ข้อมูลการติดต่อจากไอคอน (Contact Info From Icon)" ไปใส่แทน (ถ้ามีรูป Line ให้เติม Line: Available ต่อท้ายด้วย)
         3. "price": ราคา (เช่า หรือ ขาย) เก็บเป็นตัวเลขหรือข้อความที่อ่านเข้าใจง่าย
         4. "floor": ชั้นที่ตั้งของห้อง/บ้าน ถ้าไม่พบใส่ "-"
         5. "type": ระบุว่าเป็นการ "ขาย" หรือ "เช่า"
@@ -40,6 +43,9 @@ class EvaluatorAgent:
         ข้อความดิบ (Raw Text Input):
         {parsed_data.get('raw_text', '')}
         
+        ข้อมูลการติดต่อจากไอคอน (Contact Info From Icon):
+        {parsed_data.get('contact_icon', 'ไม่พบ')}
+        
         Link รูปภาพ (Images URL Input):
         {', '.join(parsed_data.get('images', []))}
         
@@ -47,7 +53,13 @@ class EvaluatorAgent:
         """
 
         try:
-            response = self.model.generate_content(prompt)
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json"
+                )
+            )
             clean_text = response.text.replace('```json', '').replace('```', '').strip()
             result = json.loads(clean_text)
             return result

@@ -16,6 +16,8 @@ __pycache__
 env
 venv
 .venv
+GCPPowerShell.txt
+agentic-scraping-pptd-0f0cad83e140.json
 
 # Exclude local configs/logs
 *.log

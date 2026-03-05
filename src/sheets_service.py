@@ -22,7 +22,8 @@ class SheetsService:
                 self.credentials_file, scopes=self.scopes
             )
             self.client = gspread.authorize(self.credentials)
-            self.sheet = self.client.open_by_url(self.sheet_url).sheet1
+            # ระบุชื่อ Sheet: LivingInsider
+            self.sheet = self.client.open_by_url(self.sheet_url).worksheet('LivingInsider')
         except Exception as e:
             print(f"Error connecting to Google Sheets: {e}")
             self.sheet = None

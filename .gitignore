@@ -2,6 +2,8 @@
 .env
 credentials.json
 playwright_state.json
+GCPPowerShell.txt
+agentic-scraping-pptd-0f0cad83e140.json
 
 # Python
 __pycache__/

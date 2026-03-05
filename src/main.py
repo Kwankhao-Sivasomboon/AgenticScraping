@@ -1,8 +1,8 @@
 from datetime import datetime
-from src.sheets_service import SheetsService
-from src.scraper_agent import ScraperAgent
-from src.evaluator_agent import EvaluatorAgent
-from src.firestore_service import FirestoreService
+from sheets_service import SheetsService
+from scraper_agent import ScraperAgent
+from evaluator_agent import EvaluatorAgent
+from firestore_service import FirestoreService
 
 def main():
     print("=== Starting Agentic AI Scraping Workflow (Detailed Hybrid) ===")
@@ -22,9 +22,29 @@ def main():
     # For testing, we are just executing the scraper setup directly with Playwright 
     target_url = "https://www.livinginsider.com/?srsltid=AfmBOooDgW_K_dldNP20QHs4sLi2OMdto01GWcucYKCxjlSbubJaGHqe"
     
-    # scraper agent will login (if session not exist), and scrape raw details from specific URLs
-    scraped_listings = scraper.scrape_living_insider(target_url)
-    print(f"\nCompleted Scraping Phase. Extracted details for {len(scraped_listings)} listings.")
+    # You can now specify property type and zone using a Random Pick strategy
+    property_types = ['บ้าน', 'คอนโด', 'ทาวน์โฮม', 'อพาร์ตเมนต์', 'พูลวิลล่า']
+    target_zones = ['สุขุมวิท', 'พระโขนง', 'อ่อนนุช', 'สำโรง', 'แบริ่ง', 'ปุณณวิถี']
+    
+    # สุ่มเลือกประเภทและโซน 1 แบบในการรอบการทำงานนี้เพื่อลดการโดนแบน
+    import random
+    
+    scraped_listings = []
+    while True:
+        selected_type = random.choice(property_types)
+        selected_zone = random.choice(target_zones)
+        
+        print(f"\n--- Agent Action: Searching for '{selected_type}' in '{selected_zone}' ---")
+
+        # scraper agent will login (if session not exist), and scrape raw details from specific URLs
+        scraped_listings = scraper.scrape_living_insider(target_url, property_type=selected_type, zone=selected_zone)
+        
+        if scraped_listings is None:
+            print("No property found for this filter combination (ไม่พบข้อมูล). Instantly retrying...")
+            continue
+            
+        print(f"\nCompleted Scraping Phase. Extracted details for {len(scraped_listings)} listings.")
+        break
 
     # 3. Validation, Intelligence & Action Phases
     print("\n--- Validation, Intelligence & Storage Phases ---")
@@ -56,27 +76,36 @@ def main():
         else:
             print(f"-> FAILED saving ID {listing_id} to Firestore.")
             
-        # D. Action Phase 2: Delivery to Google Sheets (Dashboard Sync)
-        # Expected Google Sheets Columns in order:
-        # [Date, ListingID, URL, Type, Price, Size, BedBath, Floor, HouseNumber, Name, Phone, LeadScore, Images]
+        # E. Action Phase 2: Delivery to Google Sheets (Dashboard Sync)
+        # Columns Mapping: 
+        # [วันที่ลง, วันที่โทร, ลงข้อมูล, สถานะการโทร, เข้าไปได้ไหม, แจ้งจะเข้า, ชั้น, ชื่อโครงการ, Unit Type, ราคาขาย, ราคาเช่า, SorR, SQM, เลขที่ห้อง, เบอร์โทรเจ้าของ, ชื่อเจ้าของ, ลิงค์]
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # แยกราคาขาย/เช่า จาก Gemini analysis
+        price_val = str(ai_evaluation.get("price", ""))
+        is_rent = ai_evaluation.get("type", "").lower() == "เช่า" or "เช่า" in price_val
+        
         row_to_append = [
-            current_time,
-            listing_id,
-            raw_data.get("url", ""),
-            ai_evaluation.get("type", ""),
-            ai_evaluation.get("price", ""),
-            ai_evaluation.get("size", ""),
-            ai_evaluation.get("bed_bath", ""),
-            ai_evaluation.get("floor", ""),
-            ai_evaluation.get("house_number", ""),
-            ai_evaluation.get("customer_name", ""),
-            ai_evaluation.get("phone_number", ""),
-            ai_evaluation.get("lead_score", 0),
-            ai_evaluation.get("images_url", "")
+            current_time,                # วันที่ลง
+            "-",                         # วันที่โทร (รอคนเติม)
+            "AI Scraper",                # ลงข้อมูล
+            "New",                        # สถานะการโทร
+            "-",                         # เข้าไปได้ไหม
+            "-",                         # แจ้งจะเข้า
+            ai_evaluation.get("floor", "-"),      # ชั้น
+            raw_data.get("title", "-"),           # ชื่อโครงการ (หรือชื่อประกาศ)
+            ai_evaluation.get("bed_bath", "-"),   # Unit Type
+            ai_evaluation.get("price", "-") if not is_rent else "-", # ราคาขาย
+            ai_evaluation.get("price", "-") if is_rent else "-",     # ราคาเช่า
+            ai_evaluation.get("type", "-"),       # SorR (Sale or Rent)
+            ai_evaluation.get("size", "-"),       # SQM
+            ai_evaluation.get("house_number", "-"),# เลขที่ห้อง
+            ai_evaluation.get("phone_number", "-"),# เบอร์โทรเจ้าของ
+            ai_evaluation.get("customer_name", "-"),# ชื่อเจ้าของ
+            raw_data.get("url", "")               # ลิงค์
         ]
         
-        print(f"Syncing ID {listing_id} to Google Sheets Dashboard...")
+        print(f"Syncing ID {listing_id} to Google Sheets (LivingInsider)...")
         if sheets.append_data(row_to_append):
             new_records_added += 1
             print(f"-> SUCCESS synced ID {listing_id} to Google Sheets.")

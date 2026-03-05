@@ -1,25 +1,23 @@
 import os
-import firebase_admin
-from firebase_admin import credentials, firestore
+from google.cloud import firestore
+from google.oauth2 import service_account
 from dotenv import load_dotenv
 
 load_dotenv()
 
 class FirestoreService:
     def __init__(self):
-        """Initialize connection to Google Cloud Firestore."""
+        """Initialize connection to Google Cloud Firestore using standard google-cloud library."""
         self.credentials_file = os.getenv('GOOGLE_SERVICE_ACCOUNT_FILE', 'credentials.json')
         
-        # Prevent "app already exists" error during multiple instantiations
-        if not firebase_admin._apps:
-            try:
-                cred = credentials.Certificate(self.credentials_file)
-                firebase_admin.initialize_app(cred)
-            except Exception as e:
-                print(f"Error initializing Firebase App: {e}")
-        
         try:
-            self.db = firestore.client()
+            # ใช้ google.cloud.firestore โดยตรงเพื่อรองรับ Name Database
+            cred = service_account.Credentials.from_service_account_file(self.credentials_file)
+            self.db = firestore.Client(
+                project=cred.project_id, 
+                credentials=cred, 
+                database='livinginsider-scraping'
+            )
             self.collection_name = 'Leads'
         except Exception as e:
             print(f"Error initializing Firestore Client: {e}")
