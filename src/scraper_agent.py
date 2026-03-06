@@ -81,38 +81,44 @@ class ScraperAgent:
         print("Session expired or not found. Performing login...")
         try:
             # Check which type of login form loaded using short timeouts
-            try:
-                username_input = page.get_by_placeholder("เบอร์โทร / อีเมล / ชื่อผู้ใช้ (Username)")
-                if username_input.is_visible(timeout=3000):
-                    username_input.fill(username)
-                    page.get_by_role("button", name="ดำเนินการต่อ").click()
-                    self.random_sleep(1, 3)
-                    
-                    page.get_by_placeholder("ระบุรหัสผ่าน").fill(password)
-                    page.get_by_role("button", name="ดำเนินการต่อ").click()
-                    print("Logged in using Codegen Method.")
-            except:
-                try:
-                    if page.locator(".list-login").is_visible(timeout=2000):
-                        page.locator('.list-login').first.click(force=True)
-                        self.random_sleep(1, 2)
-                        page.get_by_placeholder("ระบุรหัสผ่าน").fill(password)
-                        page.get_by_role("button", name="ดำเนินการต่อ").click()
-                        print("Logged in using List-Login Method.")
-                    elif page.locator(".email-login").is_visible(timeout=1000):
-                        page.locator('.email-login').first.click(force=True)
-                        self.random_sleep(1, 2)
-                        page.get_by_placeholder("ระบุรหัสผ่าน").fill(password)
-                        page.get_by_role("button", name="ดำเนินการต่อ").click()
-                        print("Logged in using Email-Login Method.")
-                except:
-                    # Fallback to old input selectors with explicit short timeouts
-                    page.locator('#login_username').fill(username, timeout=3000)
-                    page.locator('button.btn-next-step[data-step="1"]').click(timeout=3000)
-                    self.random_sleep(1, 2)
-                    page.locator('#password').fill(password, timeout=3000)
-                    page.locator('button.btn-next-step[data-step="2"]').click(timeout=3000)
-                    print("Logged in using Legacy Method.")
+            # Check which type of login form loaded using explicit visibility checks
+            username_input = page.get_by_placeholder("เบอร์โทร / อีเมล / ชื่อผู้ใช้ (Username)")
+            
+            if username_input.is_visible(timeout=5000):
+                username_input.fill(username)
+                page.get_by_role("button", name="ดำเนินการต่อ").click()
+                self.random_sleep(1, 3)
+                
+                page.get_by_placeholder("ระบุรหัสผ่าน").fill(password)
+                page.get_by_role("button", name="ดำเนินการต่อ").click()
+                print("Logged in using Codegen Method.")
+                
+            elif page.locator(".list-login").is_visible(timeout=2000):
+                page.locator('.list-login').first.click(force=True)
+                self.random_sleep(1, 2)
+                page.get_by_placeholder("ระบุรหัสผ่าน").fill(password)
+                page.get_by_role("button", name="ดำเนินการต่อ").click()
+                print("Logged in using List-Login Method.")
+                
+            elif page.locator(".email-login").is_visible(timeout=2000):
+                page.locator('.email-login').first.click(force=True)
+                self.random_sleep(1, 2)
+                page.get_by_placeholder("ระบุรหัสผ่าน").fill(password)
+                page.get_by_role("button", name="ดำเนินการต่อ").click()
+                print("Logged in using Email-Login Method.")
+                
+            elif page.locator('#login_username').is_visible(timeout=2000):
+                # Fallback to old input selectors
+                page.locator('#login_username').fill(username)
+                page.locator('button.btn-next-step[data-step="1"]').click()
+                self.random_sleep(1, 2)
+                page.locator('#password').fill(password)
+                page.locator('button.btn-next-step[data-step="2"]').click()
+                print("Logged in using Legacy Method.")
+                
+            else:
+                print("Could not identify the login form on this page. Wait 5s and proceed...")
+                self.random_sleep(3, 5)
 
             self.random_sleep(3, 5)
             # Guarantee we land back on dashboard after login
@@ -131,91 +137,130 @@ class ScraperAgent:
         """Filter by 'Owner' from the dropdown."""
         print("Selecting 'Owner' filter...")
         try:
-            # Wait for the button to appear in the DOM
-            page.wait_for_selector('#btn_dropdown_ownertype', state='attached', timeout=10000)
+            # 1. รอให้ปุ่มหลักโผล่และคลิกเพื่อเปิด Dropdown
+            dropdown_btn = page.locator('#btn_dropdown_ownertype')
+            dropdown_btn.wait_for(state='visible', timeout=10000)
+            dropdown_btn.click(force=True)
             
-            # Bypass Playwright's interactability checks completely using native JS click
-            page.evaluate("""
-                var btn = document.getElementById('btn_dropdown_ownertype');
-                if (btn) btn.click();
-            """)
-            self.random_sleep(0.5, 1)
+            # หน่วงเวลาเล็กน้อยรอให้ Animation ของ Dropdown กางออกให้สุด
+            self.random_sleep(1, 2)
             
-            # Click the exact owner type option using its HTML data attribute
-            page.evaluate("""
-                var option = document.querySelector('li.dropdown-ownertype-data[data-key="1"] a');
-                if (option) option.click();
-            """)
-            self.random_sleep(1, 2) 
+            # 2. เจาะจงเป้าหมายไปที่ตัวเลือก Owner
+            owner_option = page.locator('li.dropdown-ownertype-data[data-key="1"] a')
+            
+            # รอจนกว่าตัวเลือก Owner จะปรากฏให้เห็นจริงๆ ค่อยคลิก
+            owner_option.wait_for(state='visible', timeout=5000)
+            owner_option.click(force=True)
+            
+            print("Successfully clicked 'Owner'. Waiting for board to refresh...")
+            # หน่วงเวลารอเว็บดึงข้อมูลใหม่หลังสลับเป็น Owner
+            self.random_sleep(2, 3) 
+            
         except Exception as e:
-            print(f"Error selecting owner filter: {e}")
+            print(f"Error selecting owner filter natively: {e}")
+            print("Trying JavaScript Fallback...")
+            # Fallback เผื่อกรณี UI มีปัญหา สั่งยิง JavaScript ให้เข้าฟังก์ชันของเว็บโดยตรง
+            try:
+                page.evaluate("""
+                    var option = document.querySelector('li.dropdown-ownertype-data[data-key="1"] a');
+                    if (option) {
+                        option.click(); // ยิง event click ปกติ
+                    }
+                """)
+                self.random_sleep(2, 3)
+            except Exception as js_e:
+                print(f"Fallback failed: {js_e}")
 
     def select_property_type(self, page, p_type="คอนโด"):
         """Filter by Property Type e.g., 'คอนโด', 'บ้าน'"""
         print(f"Selecting Property Type: {p_type}...")
         try:
-            # Wait for the button to appear in the DOM
-            page.wait_for_selector('#btn_dropdown_actiontype', state='attached', timeout=10000)
+            # 1. รอให้ปุ่มหลักโผล่และคลิกเพื่อเปิด Dropdown
+            dropdown_btn = page.locator('#btn_dropdown_actiontype')
+            dropdown_btn.wait_for(state='visible', timeout=10000)
+            dropdown_btn.click(force=True)
             
-            # Step 1: Open Dropdown
-            page.evaluate("""
-                var btn = document.getElementById('btn_dropdown_actiontype');
-                if (btn) btn.click();
-            """)
-            self.random_sleep(0.5, 1)
-            
-            # Step 2: Select the Type using JS iteration
-            js_code = f"""
-                var items = document.querySelectorAll('li.dropdown-actiontype-data a');
-                for (var i = 0; i < items.length; i++) {{
-                    if (items[i].innerText.includes('{p_type}')) {{
-                        items[i].click();
-                        break;
-                    }}
-                }}
-            """
-            page.evaluate(js_code)
-                
+            # หน่วงเวลาเล็กน้อยรอให้ Animation ของ Dropdown กางออกให้สุด
             self.random_sleep(1, 2)
+            
+            # 2. เจาะจงเป้าหมายไปที่ตัวเลือกที่ตรงกับ p_type (เช่น "คอนโด", "บ้าน")
+            # ใช้ :has-text() เพื่อให้ Playwright ควานหาคำนั้นๆ ในรายการ
+            type_option = page.locator(f"li.dropdown-actiontype-data a:has-text('{p_type}')").first
+            
+            # รอจนกว่าตัวเลือกนั้นจะปรากฏให้เห็นจริงๆ ค่อยคลิก
+            type_option.wait_for(state='visible', timeout=5000)
+            type_option.click(force=True)
+            
+            print(f"Successfully clicked '{p_type}'. Waiting for board to refresh...")
+            self.random_sleep(2, 3) 
+            
         except Exception as e:
-            print(f"Error selecting property type: {e}")
+            print(f"Error selecting property type natively: {e}")
+            print("Trying JavaScript Fallback...")
+            # Fallback เผื่อกรณีหาข้อความไม่เจอ ให้ใช้ JS วนลูปหาแทน
+            try:
+                js_code = f"""
+                    var items = document.querySelectorAll('li.dropdown-actiontype-data a');
+                    for (var i = 0; i < items.length; i++) {{
+                        if (items[i].innerText.trim() === '{p_type}') {{
+                            items[i].click();
+                            break;
+                        }}
+                    }}
+                """
+                page.evaluate(js_code)
+                self.random_sleep(2, 3)
+            except Exception as js_e:
+                print(f"Fallback failed: {js_e}")
 
     def search_zone(self, page, zone_keyword="อ่อนนุช"):
         """Search and select a specific zone/location."""
         print(f"Searching for zone: {zone_keyword}...")
         try:
-            # 1. Open the search input modal
+            print("Opening search input modal...")
+            
+            # 1. ใช้ Playwright ค้นหาปุ่มและบังคับคลิก (รอจนกว่าจะโผล่สูงสุด 10 วิ)
             try:
-                page.get_by_text("ค้นหา..").click(timeout=3000)
-            except:
-                page.evaluate("var b = document.getElementById('box-input-search'); if(b) b.click();")
-                
+                trigger_box = page.locator("#box-input-search")
+                trigger_box.wait_for(state="visible", timeout=10000)
+                trigger_box.click(force=True)
+            except Exception as e:
+                print("Could not click main box, trying fallback...")
+                page.locator("#seearch-group-istock").click(force=True)
+
+            # รอให้ Modal เด้งขึ้นมา
+            self.random_sleep(1, 2)
+            
+            print("Typing search keyword...")
+            # 2. เจาะจงไปที่ช่องกรอกข้อความด้านใน (จาก HTML คือ id="search_zone")
+            search_input = page.locator("#search_zone")
+            
+            # รอจนกว่าช่องนี้จะโผล่ขึ้นมาให้เห็นจริงๆ
+            search_input.wait_for(state="visible", timeout=5000)
+            
+            # 3. ***คลิกที่ช่องค้นหาด้านในอีกทีก่อนพิมพ์***
+            search_input.click(force=True)
+            
+            # หน่วงเวลาเล็กน้อยเพื่อให้หน้าเว็บตอบสนองต่อการคลิก (Focus)
+            self.random_sleep(0.5, 1) 
+            
+            # ล้างข้อความเก่า (ถ้ามี) แล้วค่อยๆ พิมพ์ทีละตัวอักษร
+            search_input.fill("")
+            search_input.press_sequentially(zone_keyword, delay=150)
+            
             self.random_sleep(1, 1.5)
             
-            # 2. Type into the specific input to trigger AJAX suggestions
-            try:
-                page.get_by_role("textbox", name="ค้นหาทำเล").click(timeout=3000)
-                page.get_by_role("textbox", name="ค้นหาทำเล").fill(zone_keyword)
-            except:
-                # Clear using native ID method fallback
-                page.locator('#search_zone').fill('')
-                page.locator('#search_zone').press_sequentially(zone_keyword, delay=150)
-                
-            self.random_sleep(0.5, 1) # Wait just a bit before hitting enter
+            print("Dispatching Enter key...")
+            # กด Enter
+            search_input.press('Enter')
+            
+            print("Search execution completed.")
+            self.random_sleep(4, 7) # รอให้ตารางข้อมูลรีเฟรช
             
             try:
-                page.get_by_role("textbox", name="ค้นหาทำเล").press('Enter')
-            except:
-                page.keyboard.press('Enter')
-                
-            print("Pressed Enter for search_zone")
-
-            self.random_sleep(3, 6) # Wait for the board to refresh
-            
-            try:
-                # Check if it shows "ไม่พบข้อมูล" (No data found)
+                # ตรวจสอบว่ามีข้อมูลหรือไม่
                 no_data = page.locator("div.text-danger:has-text('ไม่พบข้อมูล')")
-                if no_data.count() > 0 and no_data.first.is_visible():
+                if no_data.count() > 0 and no_data.first.is_visible(timeout=3000):
                     print("Found 'ไม่พบข้อมูล' message! No listing exists for this selection.")
                     return False
             except:
