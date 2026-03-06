@@ -3,6 +3,7 @@ from sheets_service import SheetsService
 from scraper_agent import ScraperAgent
 from evaluator_agent import EvaluatorAgent
 from firestore_service import FirestoreService
+from drive_service import DriveService
 
 def main():
     print("=== Starting Agentic AI Scraping Workflow (Detailed Hybrid) ===")
@@ -13,6 +14,7 @@ def main():
         scraper = ScraperAgent()
         evaluator = EvaluatorAgent()
         firestore = FirestoreService()
+        drive = DriveService()
     except Exception as e:
         print(f"Error initializing services: {e}")
         return
@@ -88,32 +90,49 @@ def main():
             # แยกราคาขาย/เช่า จาก Gemini analysis
             price_val = str(ai_evaluation.get("price", ""))
             is_rent = ai_evaluation.get("type", "").lower() == "เช่า" or "เช่า" in price_val
-            
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            # Create ZIP and upload to Google Drive
+            image_urls = raw_data.get("images", [])
+            drive_link = "-"
+            if image_urls:
+                drive_link = drive.create_zip_and_upload_to_drive(image_urls, listing_id)
+
+            # จัดลำดับข้อมูล 26 คอลัมน์ (เพิ่ม Column Y: โหลดรูป, Column Z: ประเภททรัพย์)
             row_to_append = [
-                current_time,                             # วันที่ลง
-                "-",                                      # วันที่โทร (รอคนเติม)
-                "AI Scraper",                             # ลงข้อมูล
-                "New",                                    # สถานะการโทร
-                "-",                                      # เข้าไปได้ไหม
-                "-",                                      # แจ้งจะเข้า
-                ai_evaluation.get("floor", "-"),          # ชั้น
-                ai_evaluation.get("project_name", "-"),   # ชื่อโครงการ
-                ai_evaluation.get("bed_bath", "-"),       # Unit Type
-                ai_evaluation.get("price", "-") if not is_rent else "-", # ราคาขาย
-                ai_evaluation.get("price", "-") if is_rent else "-",     # ราคาเช่า
-                ai_evaluation.get("type", "-"),           # SorR (Sale or Rent)
-                ai_evaluation.get("size", "-"),           # SQM
-                ai_evaluation.get("house_number", "-"),   # เลขที่ห้อง
-                ai_evaluation.get("phone_number", "-"),   # เบอร์โทรเจ้าของ
-                ai_evaluation.get("line_id", "-"),        # Line ID
-                ai_evaluation.get("email", "-"),          # Email
-                ai_evaluation.get("customer_name", "-"),  # ชื่อเจ้าของ
-                raw_data.get("url", ""),                  # ลิงค์
-                ai_evaluation.get("images_url", "-")      # ภาพห้อง
+                ai_evaluation.get("listing_date", "-"),      # 1. วันที่ลง (จากเว็บ) (A)
+                "-",                                         # 2. วันที่โทร (B)
+                "New",                                       # 3. สถานะการโทร (C)
+                "-",                                         # 4. ขอสแกน (D)
+                "-",                                         # 5. เข้าดูห้อง (E)
+                "-",                                         # 6. วันที่เข้าดู (F)
+                "-",                                         # 7. สแกน (G)
+                "-",                                         # 8. รู้ทิศ (สแกนแล้ว) (H)
+                "AI Scraper",                                # 9. ลงข้อมูล (I)
+                "-",                                         # 10. วันนัดสแกน (J)
+                ai_evaluation.get("project_name", "-"),      # 11. ชื่อโครงการ (จากเว็บ) (K)
+                ai_evaluation.get("house_number", "-"),      # 12. เลขที่ห้อง (จากเว็บ) (L)
+                ai_evaluation.get("floor", "-"),             # 13. ชั้น (จากเว็บ) (M)
+                ai_evaluation.get("bed_bath", "-"),          # 14. Unit Type (จากเว็บ) (N)
+                ai_evaluation.get("type", "-"),              # 15. S or R (จากเว็บ) (O)
+                ai_evaluation.get("price", "-") if not is_rent else "-", # 16. ราคาขาย (จากเว็บ) (P)
+                ai_evaluation.get("price", "-") if is_rent else "-",     # 17. ราคาเช่า (จากเว็บ) (Q)
+                ai_evaluation.get("size", "-"),              # 18. Area (จากเว็บ) (R)
+                ai_evaluation.get("phone_number", "-"),      # 19. เบอร์โทรเจ้าของ (จากเว็บ) (S)
+                ai_evaluation.get("customer_name", "-"),     # 20. ชื่อเจ้าของ (จากเว็บ) (T)
+                raw_data.get("url", ""),                     # 21. ลิงค์ (จากเว็บ) (U)
+                "-",                                         # 22. Remark (V)
+                "-",                                         # 23. Feedback (W)
+                ai_evaluation.get("images_url", "-"),        # 24. ภาพห้อง (จากเว็บ) (X)
+                drive_link,                                  # 25. โหลดรูป (Y)
+                selected_type                                # 26. ประเภททรัพย์ (Z)
             ]
             
-            print(f"Syncing ID {listing_id} to Google Sheets (LivingInsider)...")
-            if sheets.append_data(row_to_append):
+            # Sanitize Row Data: บังคับทุกช่องเป็น String ป้องกัน Error จาก Google Sheets API (กรณี AI ส่งค่า {} หรือ [] มา)
+            clean_row_data = [str(val) if val is not None else "-" for val in row_to_append]
+            
+            print(f"Syncing ID {listing_id} to Google Sheets (26 Columns Mapping)...")
+            if sheets.append_data(clean_row_data):
                 new_records_added += 1
                 print(f"-> SUCCESS synced ID {listing_id} to Google Sheets.")
             else:
