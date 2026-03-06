@@ -23,23 +23,21 @@ def main():
     target_url = "https://www.livinginsider.com/?srsltid=AfmBOooDgW_K_dldNP20QHs4sLi2OMdto01GWcucYKCxjlSbubJaGHqe"
     
     # You can now specify property type and zone using a Random Pick strategy
-    property_types = ['บ้าน', 'คอนโด', 'ทาวน์โฮม', 'อพาร์ตเมนต์', 'พูลวิลล่า']
-    target_zones = ['สุขุมวิท', 'พระโขนง', 'อ่อนนุช', 'สำโรง', 'แบริ่ง', 'ปุณณวิถี']
+    from config import PROPERTY_TYPES, TARGET_ZONES, MAX_RETRIES
     
     # สุ่มเลือกประเภทและโซน 1 แบบในการรอบการทำงานนี้เพื่อลดการโดนแบน
     import random
     
-    max_retries = 3
     retries = 0
     total_scraped_session = 0
     total_skipped_session = 0
     total_saved_session = 0
     
-    while retries < max_retries:
-        selected_type = random.choice(property_types)
-        selected_zone = random.choice(target_zones)
+    while retries < MAX_RETRIES:
+        selected_type = random.choice(PROPERTY_TYPES)
+        selected_zone = random.choice(TARGET_ZONES)
         
-        print(f"\n--- Agent Action: Searching for '{selected_type}' in '{selected_zone}' (Attempt {retries + 1}/{max_retries}) ---")
+        print(f"\n--- Agent Action: Searching for '{selected_type}' in '{selected_zone}' (Attempt {retries + 1}/{MAX_RETRIES}) ---")
 
         # scraper agent will login (if session not exist), and scrape raw details from specific URLs
         scraped_listings = scraper.scrape_living_insider(target_url, property_type=selected_type, zone=selected_zone)
@@ -47,7 +45,7 @@ def main():
         if not scraped_listings: # Handles both None and []
             print(f"No property found for '{selected_type}' in '{selected_zone}' (ไม่พบข้อมูล). Instantly retrying...")
             retries += 1
-            if retries >= max_retries:
+            if retries >= MAX_RETRIES:
                 print("Max retries reached. Exiting scraping phase.")
             continue
             
@@ -131,7 +129,7 @@ def main():
         else:
             print("\nAll scraped listings this round were duplicates or failed to save (0 new records).")
             retries += 1
-            if retries < max_retries:
+            if retries < MAX_RETRIES:
                 print("Retrying with a new location/type...")
             else:
                 print("Max retries reached. All found listings in recent rounds were duplicates.")

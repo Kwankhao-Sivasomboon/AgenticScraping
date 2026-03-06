@@ -3,6 +3,7 @@ import time
 import random
 from playwright.sync_api import sync_playwright
 from playwright_stealth import stealth_sync
+from config import MAX_ITEMS_PER_RUN, SKIP_KEYWORDS
 
 class ScraperAgent:
     def __init__(self):
@@ -173,6 +174,10 @@ class ScraperAgent:
 
     def select_property_type(self, page, p_type="คอนโด"):
         """Filter by Property Type e.g., 'คอนโด', 'บ้าน'"""
+        if not p_type or p_type == "ทั้งหมด":
+            print("Skipping Property Type selection (Fetching all types)...")
+            return
+            
         print(f"Selecting Property Type: {p_type}...")
         try:
             # 1. รอให้ปุ่มหลักโผล่และคลิกเพื่อเปิด Dropdown
@@ -376,7 +381,7 @@ class ScraperAgent:
                 
                 # Fetch valid links that don't have "ดัน" in their date box to avoid wasting time on bumped listings
                 js_script = """
-                () => {
+                (skipKeywords) => {
                     const links = new Set();
                     document.querySelectorAll("a[href*='istockdetail/']").forEach(a => {
                         let container = a;
@@ -387,7 +392,8 @@ class ScraperAgent:
                             if (dateElem) {
                                 foundDate = true;
                                 let dateText = dateElem.innerText || "";
-                                if (!dateText.includes('ดัน')) {
+                                let shouldSkip = skipKeywords.some(kw => dateText.includes(kw));
+                                if (!shouldSkip) {
                                     links.add(a.href);
                                 }
                                 break;
@@ -403,7 +409,7 @@ class ScraperAgent:
                 }
                 """
                 
-                valid_urls = page.evaluate(js_script)
+                valid_urls = page.evaluate(js_script, SKIP_KEYWORDS)
                 
                 unique_urls = set()
                 for url in valid_urls:
@@ -414,7 +420,7 @@ class ScraperAgent:
                 url_list = list(unique_urls)
                 
                 for index, url in enumerate(url_list):
-                    if index >= 3: # Limit for testing, you can remove this later
+                    if index >= MAX_ITEMS_PER_RUN: # Limit for testing, you can remove this later
                         break
                         
                     print(f"\nProcessing Detail URL {index + 1}: {url}")
