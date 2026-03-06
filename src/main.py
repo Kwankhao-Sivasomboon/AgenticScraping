@@ -78,7 +78,7 @@ def main():
             
         # E. Action Phase 2: Delivery to Google Sheets (Dashboard Sync)
         # Columns Mapping: 
-        # [วันที่ลง, วันที่โทร, ลงข้อมูล, สถานะการโทร, เข้าไปได้ไหม, แจ้งจะเข้า, ชั้น, ชื่อโครงการ, Unit Type, ราคาขาย, ราคาเช่า, SorR, SQM, เลขที่ห้อง, เบอร์โทรเจ้าของ, ชื่อเจ้าของ, ลิงค์]
+        # [วันที่ลง, วันที่โทร, ลงข้อมูล, สถานะการโทร, เข้าไปได้ไหม, แจ้งจะเข้า, ชั้น, ชื่อโครงการ, Unit Type, ราคาขาย, ราคาเช่า, SorR, SQM, เลขที่ห้อง, เบอร์โทรเจ้าของ, Line ID, Email, ชื่อเจ้าของ, ลิงค์, ภาพห้อง]
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         # แยกราคาขาย/เช่า จาก Gemini analysis
@@ -86,23 +86,26 @@ def main():
         is_rent = ai_evaluation.get("type", "").lower() == "เช่า" or "เช่า" in price_val
         
         row_to_append = [
-            current_time,                # วันที่ลง
-            "-",                         # วันที่โทร (รอคนเติม)
-            "AI Scraper",                # ลงข้อมูล
-            "New",                        # สถานะการโทร
-            "-",                         # เข้าไปได้ไหม
-            "-",                         # แจ้งจะเข้า
-            ai_evaluation.get("floor", "-"),      # ชั้น
-            raw_data.get("title", "-"),           # ชื่อโครงการ (หรือชื่อประกาศ)
-            ai_evaluation.get("bed_bath", "-"),   # Unit Type
+            current_time,                             # วันที่ลง
+            "-",                                      # วันที่โทร (รอคนเติม)
+            "AI Scraper",                             # ลงข้อมูล
+            "New",                                    # สถานะการโทร
+            "-",                                      # เข้าไปได้ไหม
+            "-",                                      # แจ้งจะเข้า
+            ai_evaluation.get("floor", "-"),          # ชั้น
+            ai_evaluation.get("project_name", "-"),   # ชื่อโครงการ
+            ai_evaluation.get("bed_bath", "-"),       # Unit Type
             ai_evaluation.get("price", "-") if not is_rent else "-", # ราคาขาย
             ai_evaluation.get("price", "-") if is_rent else "-",     # ราคาเช่า
-            ai_evaluation.get("type", "-"),       # SorR (Sale or Rent)
-            ai_evaluation.get("size", "-"),       # SQM
-            ai_evaluation.get("house_number", "-"),# เลขที่ห้อง
-            ai_evaluation.get("phone_number", "-"),# เบอร์โทรเจ้าของ
-            ai_evaluation.get("customer_name", "-"),# ชื่อเจ้าของ
-            raw_data.get("url", "")               # ลิงค์
+            ai_evaluation.get("type", "-"),           # SorR (Sale or Rent)
+            ai_evaluation.get("size", "-"),           # SQM
+            ai_evaluation.get("house_number", "-"),   # เลขที่ห้อง
+            ai_evaluation.get("phone_number", "-"),   # เบอร์โทรเจ้าของ
+            ai_evaluation.get("line_id", "-"),        # Line ID
+            ai_evaluation.get("email", "-"),          # Email
+            ai_evaluation.get("customer_name", "-"),  # ชื่อเจ้าของ
+            raw_data.get("url", ""),                  # ลิงค์
+            ai_evaluation.get("images_url", "-")      # ภาพห้อง
         ]
         
         print(f"Syncing ID {listing_id} to Google Sheets (LivingInsider)...")

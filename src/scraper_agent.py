@@ -23,21 +23,36 @@ class ScraperAgent:
 
     def close_banners(self, page):
         """Close any annoying promotional banners blocking the screen."""
-        try:
-            print("Checking for blocking banners...")
-            # Safely click just the ad close buttons and hide pure ad containers
-            page.evaluate("""
-                var closeBtns = document.querySelectorAll('.btn-close[data-dismiss="modal"], .btn-close[onclick*="closeBanner"], a[onclick*="closeBannerAcceptAgent"], .close[data-dismiss="modal"], button.close, #popup-close');
-                closeBtns.forEach(btn => btn.click());
-                
-                var ads = document.querySelectorAll('#ads-banner, #myModalIntro');
-                ads.forEach(el => {
-                    el.style.setProperty('display', 'none', 'important');
-                });
-            """)
-            self.random_sleep(1, 2)
-        except Exception as e:
-            pass
+        print("Checking for blocking banners (allowing time for late ads to load)...")
+        for _ in range(2):
+            try:
+                # Explicitly target the condition modal from the user's codegen
+                try:
+                    if page.locator("#modal-condition-istock").is_visible(timeout=500):
+                        page.locator("#modal-condition-istock").get_by_label("Close").click(force=True)
+                except:
+                    pass
+
+                # Safely click just the ad close buttons
+                page.evaluate("""
+                    var closeBtns = document.querySelectorAll('.btn-close[data-dismiss="modal"], .btn-close[onclick*="closeBanner"], a[onclick*="closeBannerAcceptAgent"], a.btn-close[onclick="closeBannerAcceptAgent();"], .close[data-dismiss="modal"], button.close[data-dismiss="modal"], #popup-close');
+                    closeBtns.forEach(btn => {
+                        try { btn.click(); } catch(e) {}
+                    });
+                    
+                    // Force hide backdrops specifically
+                    var backdrops = document.querySelectorAll('.modal-backdrop');
+                    backdrops.forEach(el => {
+                        el.style.setProperty('display', 'none', 'important');
+                        el.style.setProperty('pointer-events', 'none', 'important');
+                    });
+                    
+                    document.body.classList.remove('modal-open');
+                    document.body.style.setProperty('overflow', 'auto', 'important');
+                """)
+                self.random_sleep(1, 2)  # Wait and let other ads pop up if any
+            except Exception as e:
+                pass
 
     def login(self, page, context):
         """Perform login and save session state."""
@@ -53,60 +68,59 @@ class ScraperAgent:
         # Go directly to member_istock.php. If not logged in, it will show the login prompt.
         page.goto('https://www.livinginsider.com/member_istock.php', wait_until='domcontentloaded', timeout=60000)
         self.random_sleep(2, 4)
-            
-        # Check if we are already logged in from the state file
+        
+        # Determine if we are on dashboard or login page
         try:
-            # We must check if the element is actually visible, because hidden DOM nodes can cause false positives
-            dashboard_element = page.query_selector("a[href*='logout']")
-            profile_element = page.query_selector(".profile-name")
-            
-            if (dashboard_element and dashboard_element.is_visible()) or (profile_element and profile_element.is_visible()):
-                # Also double check that the login modal isn't popping up over everything
-                if not page.is_visible('.list-login') and not page.is_visible('.email-login') and not page.is_visible('#login_username'):
-                    print("Session active! No need to login again.")
-                    return
-        except:
+            # Check if we are already logged in
+            if page.locator("#btn_dropdown_ownertype").is_visible(timeout=3000) or page.locator("a[href*='logout']").is_visible(timeout=1000):
+                print("Session active! No need to login again.")
+                return
+        except Exception as e:
             pass
 
         print("Session expired or not found. Performing login...")
-        
         try:
-            # Wait for either the history profile or the username input
-            page.wait_for_selector('.list-login, .email-login, #login_username', timeout=10000)
-            
-            if page.is_visible('.list-login') or page.is_visible('.email-login'):
-                if page.is_visible('.list-login'):
-                    print("Found History Login profile (.list-login). Clicking to use it...")
-                    page.click('.list-login', force=True)
-                else:
-                    print("Found History Login profile (.email-login). Clicking to use it...")
-                    page.click('.email-login', force=True)
-                
-                self.random_sleep(1, 2)
-                
-                # Wait for password input to appear and fill it
-                try:
-                    page.wait_for_selector('#password', state='visible', timeout=10000)
-                    page.fill('#password', password)
-                except Exception as e:
-                    print("Password field did not appear after clicking history profile, continuing...", e)
+            # Check which type of login form loaded using short timeouts
+            try:
+                username_input = page.get_by_placeholder("เบอร์โทร / อีเมล / ชื่อผู้ใช้ (Username)")
+                if username_input.is_visible(timeout=3000):
+                    username_input.fill(username)
+                    page.get_by_role("button", name="ดำเนินการต่อ").click()
+                    self.random_sleep(1, 3)
                     
-                page.click('button.btn-next-step[data-step="2"]', force=True)
+                    page.get_by_placeholder("ระบุรหัสผ่าน").fill(password)
+                    page.get_by_role("button", name="ดำเนินการต่อ").click()
+                    print("Logged in using Codegen Method.")
+            except:
+                try:
+                    if page.locator(".list-login").is_visible(timeout=2000):
+                        page.locator('.list-login').first.click(force=True)
+                        self.random_sleep(1, 2)
+                        page.get_by_placeholder("ระบุรหัสผ่าน").fill(password)
+                        page.get_by_role("button", name="ดำเนินการต่อ").click()
+                        print("Logged in using List-Login Method.")
+                    elif page.locator(".email-login").is_visible(timeout=1000):
+                        page.locator('.email-login').first.click(force=True)
+                        self.random_sleep(1, 2)
+                        page.get_by_placeholder("ระบุรหัสผ่าน").fill(password)
+                        page.get_by_role("button", name="ดำเนินการต่อ").click()
+                        print("Logged in using Email-Login Method.")
+                except:
+                    # Fallback to old input selectors with explicit short timeouts
+                    page.locator('#login_username').fill(username, timeout=3000)
+                    page.locator('button.btn-next-step[data-step="1"]').click(timeout=3000)
+                    self.random_sleep(1, 2)
+                    page.locator('#password').fill(password, timeout=3000)
+                    page.locator('button.btn-next-step[data-step="2"]').click(timeout=3000)
+                    print("Logged in using Legacy Method.")
+
+            self.random_sleep(3, 5)
+            # Guarantee we land back on dashboard after login
+            if "member_istock" not in page.url:
+                print("Navigating back to member istock area...")
+                page.goto('https://www.livinginsider.com/member_istock.php', wait_until='domcontentloaded', timeout=60000)
                 self.random_sleep(3, 5)
-                print("History login completed.")
-            else:
-                print("Standard login form found. Entering credentials...")
-                page.fill('#login_username', username)
-                page.click('button.btn-next-step[data-step="1"]')
-                self.random_sleep(1, 2)
-                
-                page.wait_for_selector('#password', state='visible', timeout=10000)
-                page.fill('#password', password)
-                page.click('button.btn-next-step[data-step="2"]')
-                self.random_sleep(3, 5)
-                
-            print("Login completed successfully.")
-            
+
             # SAVE SESSION!
             context.storage_state(path=self.state_file)
             print("Session state saved! Next run will use this session.")
@@ -117,12 +131,22 @@ class ScraperAgent:
         """Filter by 'Owner' from the dropdown."""
         print("Selecting 'Owner' filter...")
         try:
-            page.wait_for_selector('#btn_dropdown_ownertype', timeout=5000)
-            page.locator('#btn_dropdown_ownertype').click()
-            self.random_sleep(1, 2)
+            # Wait for the button to appear in the DOM
+            page.wait_for_selector('#btn_dropdown_ownertype', state='attached', timeout=10000)
             
-            page.locator('li.dropdown-ownertype-data[data-key="1"] a').click()
-            self.random_sleep(2, 4) 
+            # Bypass Playwright's interactability checks completely using native JS click
+            page.evaluate("""
+                var btn = document.getElementById('btn_dropdown_ownertype');
+                if (btn) btn.click();
+            """)
+            self.random_sleep(0.5, 1)
+            
+            # Click the exact owner type option using its HTML data attribute
+            page.evaluate("""
+                var option = document.querySelector('li.dropdown-ownertype-data[data-key="1"] a');
+                if (option) option.click();
+            """)
+            self.random_sleep(1, 2) 
         except Exception as e:
             print(f"Error selecting owner filter: {e}")
 
@@ -130,20 +154,29 @@ class ScraperAgent:
         """Filter by Property Type e.g., 'คอนโด', 'บ้าน'"""
         print(f"Selecting Property Type: {p_type}...")
         try:
-            page.wait_for_selector('#btn_dropdown_actiontype', timeout=5000)
-            page.locator('#btn_dropdown_actiontype').click()
-            self.random_sleep(1, 2)
+            # Wait for the button to appear in the DOM
+            page.wait_for_selector('#btn_dropdown_actiontype', state='attached', timeout=10000)
             
-            # Use playwright locator to find any a tag that contains the text
-            # This triggers the javascript event properly
-            property_element = page.locator(f"li.dropdown-actiontype-data a:has-text('{p_type}')").first
-            if property_element.count() > 0:
-                property_element.click()
-            else:
-                # Fallback to pure onclick search
-                page.locator(f"a[onclick*=\"'{p_type}'\"]").first.click()
+            # Step 1: Open Dropdown
+            page.evaluate("""
+                var btn = document.getElementById('btn_dropdown_actiontype');
+                if (btn) btn.click();
+            """)
+            self.random_sleep(0.5, 1)
+            
+            # Step 2: Select the Type using JS iteration
+            js_code = f"""
+                var items = document.querySelectorAll('li.dropdown-actiontype-data a');
+                for (var i = 0; i < items.length; i++) {{
+                    if (items[i].innerText.includes('{p_type}')) {{
+                        items[i].click();
+                        break;
+                    }}
+                }}
+            """
+            page.evaluate(js_code)
                 
-            self.random_sleep(2, 4)
+            self.random_sleep(1, 2)
         except Exception as e:
             print(f"Error selecting property type: {e}")
 
@@ -151,37 +184,31 @@ class ScraperAgent:
         """Search and select a specific zone/location."""
         print(f"Searching for zone: {zone_keyword}...")
         try:
-            # 1. Open the search input modal by clicking the wrapper
+            # 1. Open the search input modal
             try:
-                page.wait_for_selector('#box-input-search', timeout=3000)
-                page.locator('#box-input-search').click()
-                self.random_sleep(1, 1.5)
+                page.get_by_text("ค้นหา..").click(timeout=3000)
             except:
-                pass
+                page.evaluate("var b = document.getElementById('box-input-search'); if(b) b.click();")
                 
+            self.random_sleep(1, 1.5)
+            
             # 2. Type into the specific input to trigger AJAX suggestions
-            page.wait_for_selector('#search_zone', timeout=5000)
-            
-            # Clear using native method
-            page.locator('#search_zone').fill('')
-            page.locator('#search_zone').press_sequentially(zone_keyword, delay=150)
-            
+            try:
+                page.get_by_role("textbox", name="ค้นหาทำเล").click(timeout=3000)
+                page.get_by_role("textbox", name="ค้นหาทำเล").fill(zone_keyword)
+            except:
+                # Clear using native ID method fallback
+                page.locator('#search_zone').fill('')
+                page.locator('#search_zone').press_sequentially(zone_keyword, delay=150)
+                
             self.random_sleep(0.5, 1) # Wait just a bit before hitting enter
             
-            # Only hit enter if no follow list appears, or hit enter anyway to trigger form
-            page.keyboard.press('Enter')
-            print("Pressed Enter for #search_zone")
-            
-            # Check the modal version just in case
             try:
-                if page.locator('#search_zone_follow').is_visible():
-                    page.locator('#search_zone_follow').fill('')
-                    page.locator('#search_zone_follow').press_sequentially(zone_keyword, delay=150)
-                    self.random_sleep(0.5, 1)
-                    page.keyboard.press('Enter')
-                    print("Pressed Enter for #search_zone_follow")
+                page.get_by_role("textbox", name="ค้นหาทำเล").press('Enter')
             except:
-                pass
+                page.keyboard.press('Enter')
+                
+            print("Pressed Enter for search_zone")
 
             self.random_sleep(3, 6) # Wait for the board to refresh
             
@@ -232,17 +259,59 @@ class ScraperAgent:
                 context_args['storage_state'] = self.state_file
             
             context = browser.new_context(**context_args)
+            
+            # --- CSS-Level Ad Blocker (Block from start) ---
+            # This injects a stylesheet instantly, forcing ads/backdrops to be hidden forever
+            context.add_init_script("""
+                window.addEventListener('DOMContentLoaded', () => {
+                    const style = document.createElement('style');
+                    style.innerHTML = `
+                        #modal-condition-istock, 
+                        #myModalIntro, 
+                        #ads-banner, 
+                        .PopupAds, 
+                        .modal-backdrop {
+                            display: none !important;
+                            visibility: hidden !important;
+                            pointer-events: none !important;
+                            z-index: -9999 !important;
+                            opacity: 0 !important;
+                        }
+                        body, html {
+                            overflow: auto !important;
+                            padding-right: 0 !important;
+                        }
+                    `;
+                    document.documentElement.appendChild(style);
+                });
+            """)
+            
+            # --- Network-Level Ad Blocker ---
+            ad_domains = [
+                "doubleclick.net", "googlesyndication.com", "googleadservices.com", 
+                "facebook.net", "facebook.com/tr", "google-analytics.com", 
+                "googletagmanager.com", "criteo.com", "taboola.com", "outbrain.com",
+                "ads-twitter.com", "hotjar.com", "adsco.re"
+            ]
+            
+            def block_ads(route):
+                if any(ad in route.request.url for ad in ad_domains):
+                    route.abort()
+                else:
+                    route.continue_()
+                    
+            try:
+                context.route("**/*", block_ads)
+                print("Network-level ad blocker activated.")
+            except Exception as e:
+                print(f"Could not setup network ad blocker: {e}")
+            # --------------------------------
+            
             page = context.new_page()
             stealth_sync(page)
             
             # Execute Login (will skip if session is valid)
             self.login(page, context)
-            
-            # Since login now lands on member_istock.php, we just need to ensure URL is correct
-            if "member_istock" not in page.url:
-                print("Navigating to member istock area...")
-                page.goto('https://www.livinginsider.com/member_istock.php', wait_until='domcontentloaded', timeout=60000)
-                self.random_sleep(3, 6)
             
             self.close_banners(page)
 
@@ -349,12 +418,45 @@ class ScraperAgent:
                     
                     # Reveal phone number in text if exists
                     try:
-                        phone_reveal_btn = detail_page.locator('.p-phone-contact').first
-                        if phone_reveal_btn.is_visible():
-                            phone_reveal_btn.click(force=True)
-                            self.random_sleep(1, 1.5)
-                    except:
+                        # 1. Expand "Show more details" to reveal hidden text (like Line ID)
+                        try:
+                            detail_page.get_by_role("link", name="แสดงรายละเอียดเพิ่มเติม").click(timeout=1500)
+                        except:
+                            pass
+                            
+                        try:
+                            expand_btns = detail_page.locator('.btn-open-text')
+                            for i in range(expand_btns.count()):
+                                if expand_btns.nth(i).is_visible():
+                                    expand_btns.nth(i).click(force=True)
+                                    self.random_sleep(0.5, 1)
+                        except Exception as e:
+                            print(f"Error expanding details: {e}")
+                            
+                        # 2. Reveal all phone numbers inline using JS to guarantee unmasking
+                        try:
+                            detail_page.evaluate("""
+                                var phoneBtns = document.querySelectorAll('.p-phone-contact, a[data-vouvist]');
+                                phoneBtns.forEach(btn => { try { btn.click(); } catch(e) {} });
+                            """)
+                            self.random_sleep(0.5, 1.5)
+                        except Exception as e:
+                            print(f"Error revealing phone numbers: {e}")
+                            
+                        # 3. Reveal all emails
+                        try:
+                            email_btns = detail_page.locator('.p-email-contact')
+                            for i in range(email_btns.count()):
+                                if email_btns.nth(i).is_visible():
+                                    email_btns.nth(i).click(force=True)
+                                    self.random_sleep(0.5, 1)
+                        except Exception as e:
+                            print(f"Error revealing emails: {e}")
+                            
+                    except Exception as e:
                         pass
+                    
+                    self.random_sleep(1, 2) # Wait for DOM updates to render text
                     
                     # Extract raw text
                     raw_text = detail_page.evaluate("document.body.innerText")
@@ -373,7 +475,8 @@ class ScraperAgent:
                             gallery_imgs = detail_page.locator('.lg-thumb-item img')
                             for i in range(gallery_imgs.count()):
                                 src = gallery_imgs.nth(i).get_attribute('src')
-                                if src and 'http' in src and 'upload' in src:
+                                # Filter only property images, rejecting avatars/banners/icons
+                                if src and 'http' in src and 'upload/topic' in src:
                                     image_urls.append(src)
                                     
                             # Close the gallery modal with Escape or close button
@@ -387,7 +490,8 @@ class ScraperAgent:
                         images = detail_page.query_selector_all('img')
                         for img in images:
                             src = img.get_attribute('src')
-                            if src and 'http' in src and 'upload' in src and 'contact' not in src:
+                            # Strict filter for property images only
+                            if src and 'http' in src and 'upload/topic' in src:
                                 image_urls.append(src)
                                 
                     # Remove duplicates while preserving order
