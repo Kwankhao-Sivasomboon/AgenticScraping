@@ -160,25 +160,38 @@ class ScraperAgent:
     def search_zone(self, page, zone_keyword="บางนา"):
         print(f"🔍 [Search] เริ่มกระบวนการค้นหา: {zone_keyword}")
         try:
-            # 1. กดให้ pop up ขึ้นมา
+            # 1. กดให้ pop up ขึ้นมา พยายามย้ำๆ 3 รอบถ้ายังไม่ขึ้น
             print("1️⃣ คลิกเปิด Popup...")
-            # ยิง JavaScript เปิด Popup เพื่อความชัวร์ที่สุด เพราะกล่องเดิมอาจจะโดนทับ
-            page.evaluate("let box = document.getElementById('box-input-search'); if(box) box.click();")
-            self.random_sleep(1, 2)
-            
-            # 2. คลิกที่ช่องพิมพ์ใน Popup อีกที
-            print("2️⃣ รอช่องพิมพ์ #search_zone")
             search_input = page.locator("#search_zone").first
-            search_input.wait_for(state='visible', timeout=10000)
+            
+            popup_opened = False
+            for attempt in range(3):
+                # เผื่อช่อง input แบบเดิมโดนซ่อน ให้ลอง evaluate click
+                page.evaluate("let box = document.getElementById('box-input-search'); if(box) box.click();")
+                self.random_sleep(1.5, 2.5)
+                
+                if search_input.is_visible():
+                    popup_opened = True
+                    break
+                else:
+                    print(f"   [Retry {attempt+1}/3] กำลังพยายามคลิกกล่องค้นหาอีกครั้ง...")
+            
+            if not popup_opened:
+                raise Exception("Cannot open the search popup after 3 attempts.")
+
+            # 2. คลิกที่ช่องพิมพ์ใน Popup อีกที (เพื่อความชัวร์ว่า focus อยู่ที่ช่อง)
+            print("2️⃣ รอช่องพิมพ์ #search_zone และโฟกัส")
+            search_input.wait_for(state='visible', timeout=10000) # เพิ่มเวลาเผื่อโหลดช้า
             search_input.click(force=True)
             search_input.fill("")
+            self.random_sleep(1, 2)
 
             # 3. พิมพ์ด้วย delay 150ms ตามที่คุณต้องการ
             print(f"3️⃣ เริ่มพิมพ์: {zone_keyword}")
             search_input.press_sequentially(zone_keyword, delay=150)
 
             # 4. หยุดรอให้เว็บดึง Autocomplete (สำคัญมาก)
-            self.random_sleep(3, 4) 
+            self.random_sleep(3, 5) # เผื่อเว็บหาข้อมูล autocomplete นาน
 
             # 5. แล้ว Enter
             print("4️⃣ กด Enter!")
@@ -190,7 +203,12 @@ class ScraperAgent:
             return True
             
         except Exception as e:
-            print(f"❌ [Search Error]: {e}")
+            print(f"❌ [Search Error]: เกิดข้อผิดพลาดตอนค้นหา: {e}")
+            try:
+                page.screenshot(path="error_search_timeout.png", full_page=True)
+                print("📸 บันทึกภาพหน้าจอตอนพังไว้ที่ 'error_search_timeout.png' แล้ว ลองเปิดดูครับ")
+            except:
+                pass
             return False
 
     def scrape_living_insider(self, target_url, property_type="คอนโด", zone="อ่อนนุช"):
@@ -246,7 +264,7 @@ class ScraperAgent:
                             if(priceEl) p = priceEl.innerText || priceEl.textContent; \
                         } \
                         return {url: a.href, price: p}; \
-                    }).filter(item => !item.url.includes('javascript') && item.url.includes('http')); \
+                    }).filter(item => !item.url.includes('javascript') && item.url.includes('http') && item.url.includes('livinginsider.com')); \
                 }", SKIP_KEYWORDS)
 
                 valid_urls = []
@@ -261,25 +279,31 @@ class ScraperAgent:
                         continue
                     seen_urls.add(url)
                     
-                    raw_price = str(item['price']).replace('฿', '').replace(',', '').strip()
+                    raw_price = str(item['price']).replace(',', '').strip()
                     
                     try:
-                        p_val = 0
-                        # แก้ปัญหาแปลงคำว่า "ล้าน" เป็นตัวเลข (กันบ้าน 11 ล้านหลุดมา)
-                        if 'ล้าน' in raw_price:
-                            clean_price = raw_price.replace('ล้าน', '').strip()
-                            p_val = float(clean_price) * 1000000
-                        else:
-                            # ดึงเฉพาะตัวเลขและจุดทศนิยม
-                            digits = ''.join(c for c in raw_price if c.isdigit() or c == '.')
-                            if digits: p_val = float(digits)
+                        p_vals = []
+                        import re
+                        # ดึงกลุ่มตัวเลขทั้งหมด เช่น "12.5 ล้าน", "75000"
+                        matches = re.findall(r'(\d+(?:\.\d+)?)\s*(ล้าน)?', raw_price)
                         
-                        if p_val > limit:
-                            print(f"🚫 ตัดทิ้ง: ราคา {p_val:,.0f} (เกินงบ {limit:,.0f})")
+                        for val, is_million in matches:
+                            num = float(val)
+                            if is_million == 'ล้าน':
+                                num *= 1000000
+                            p_vals.append(num)
+                        
+                        # ถ้าราคาขายในกล่องข้อความเกิน limit ให้ตัดทิ้ง
+                        # คนมักจะใส่ราคาขายกับเช่ามาคู่กัน ราคาขายจะสูงกว่าเสมอ เราจะเช็คราคาสูงสุด
+                        max_price = max(p_vals) if p_vals else 0
+                        
+                        if max_price > limit:
+                            print(f"🚫 ตัดทิ้ง: {raw_price} (ราคา {max_price:,.0f} เกินงบ {limit:,.0f})")
                             continue 
                             
                         valid_urls.append(url)
                     except Exception as e:
+                        print(f"⚠️ [Parse Error] อ่านราคาไม่สำเร็จ: '{raw_price}' -> ให้เว็บวิ่งต่อก่อน ({e})")
                         valid_urls.append(url)
 
                 # ทำการ Unique URL เพื่อกันการขูดข้อมูลซ้ำ
@@ -301,11 +325,55 @@ class ScraperAgent:
                         body_locator.wait_for(state='attached', timeout=10000)
                         raw_text = body_locator.inner_text()
                         
+                        # ดูดชื่อเจ้าของจาก HTML #nameOwner label ที่ซ่อนอยู่
+                        owner_name = "-"
+                        try:
+                            owner_locator = dp.locator('#nameOwner label').first
+                            if owner_locator.is_visible(timeout=2000):
+                                owner_name = owner_locator.inner_text().strip()
+                                # ถ้ามันมี ... ต่อท้าย ให้ตัดออก หรือถ้าไม่อยากตัดก็ปล่อยไว้
+                                if owner_name.endswith('...'):
+                                    owner_name = owner_name[:-3].strip()
+                        except:
+                            pass
+                        
+                        # ======== เพิ่มส่วนดึงรูปภาพ ========
+                        try:
+                            # หาปุ่มหรือรูปใหญ่เพื่อให้ LightGallery (ถ้ามี) โหลดขึ้นมาระหว่างคลิก
+                            dp.evaluate('''() => {
+                                let cover = document.querySelector('.owl-item.active img, .image-istock, #img-cover');
+                                if(cover) cover.click();
+                            }''')
+                            self.random_sleep(1, 2)
+                            
+                            image_urls = dp.evaluate('''() => {
+                                let imgs = Array.from(document.querySelectorAll('.lg-thumb-item img, .lg-item img, .image-istock, img[src*="og_detail"], img[src*="upload/topic"]'));
+                                let urls = imgs.map(img => img.src || img.getAttribute('data-src'));
+                                
+                                let validUrls = urls.filter(src => {
+                                    if (!src) return false;
+                                    if (!src.includes('http')) return false;
+                                    let lowerSrc = src.toLowerCase();
+                                    if (['avatar', 'icon', 'banner', 'logo'].some(v => lowerSrc.includes(v))) return false;
+                                    return src.includes('livinginsider.com') && (src.includes('og_detail') || src.includes('upload/topic'));
+                                });
+                                return [...new Set(validUrls)].slice(0, 15); // กันเหนียวเผื่อรูปเยอะ เอาแค่ 15 รูปแรก
+                            }''')
+                            # ปิด Gallery ทิ้งหลังกวาดรูปเสร็จ
+                            dp.keyboard.press('Escape')
+                            self.random_sleep(0.5, 1)
+                        except Exception as img_err:
+                            print(f"⚠️ ดึงภาพไม่สำเร็จ: {img_err}")
+                            image_urls = []
+                        # =====================================
+                        
                         # 3. เซฟลง results เฉพาะกรณีที่ดึง raw_text ได้จริง
                         if raw_text and len(raw_text.strip()) > 0:
                             results.append({
                                 "listing_id": url.split('/')[-1].replace('.html', ''), 
                                 "url": url, 
+                                "images": image_urls, # ใส่ข้อมูลรูปลงไป
+                                "owner_name": owner_name, # นำชื่อที่สกัดได้แนบไปด้วย
                                 "raw_text": raw_text[:5000]
                             })
                             print(f"✅ บันทึกสำเร็จ (Total: {len(results)}/{MAX_ITEMS_PER_RUN})")

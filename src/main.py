@@ -3,7 +3,7 @@ from sheets_service import SheetsService
 from scraper_agent import ScraperAgent
 from evaluator_agent import EvaluatorAgent
 from firestore_service import FirestoreService
-from drive_service import DriveService
+from storage_service import StorageService
 
 def main():
     print("=== Starting Agentic AI Scraping Workflow (Detailed Hybrid) ===")
@@ -14,7 +14,7 @@ def main():
         scraper = ScraperAgent()
         evaluator = EvaluatorAgent()
         firestore = FirestoreService()
-        drive = DriveService()
+        storage_svc = StorageService()
     except Exception as e:
         print(f"Error initializing services: {e}")
         return
@@ -77,6 +77,17 @@ def main():
             # B. Intelligence Phase (Gemini Analysis)
             ai_evaluation = evaluator.evaluate_listing(raw_data)
             
+            # Create ZIP (WebP encoded) and upload to Firebase Storage
+            image_urls = raw_data.get("images", [])
+            drive_link = "-"
+            if image_urls:
+                drive_link = storage_svc.create_zip_and_upload(image_urls, listing_id)
+                if drive_link and drive_link != "-":
+                    print(f"📦 อัปโหลด ZIP รูปลง Cloud Storage เรียบร้อย! ลิงก์: {drive_link}")
+                    
+            # ยัดลิงก์เข้า raw_data ด้วยเพื่อให้ถูกเก็บบน Firestore
+            raw_data['image_zip_url'] = drive_link
+            
             # C. Action Phase 1: Storage in Firestore (Main Storage)
             print(f"Saving ID {listing_id} to Firestore...")
             if firestore.save_listing(listing_id, raw_data, ai_evaluation):
@@ -88,19 +99,25 @@ def main():
             current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
             # แยกราคาขาย/เช่า จาก Gemini analysis
-            price_val = str(ai_evaluation.get("price", ""))
-            is_rent = ai_evaluation.get("type", "").lower() == "เช่า" or "เช่า" in price_val
-            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-            # Create ZIP and upload to Google Drive
-            image_urls = raw_data.get("images", [])
-            drive_link = "-"
-            if image_urls:
-                drive_link = drive.create_zip_and_upload_to_drive(image_urls, listing_id)
+            price_sell = ai_evaluation.get("price_sell", "-")
+            price_rent = ai_evaluation.get("price_rent", "-")
+            
+            # คำนวณสถานะ S or R ของประกาศ
+            has_sell = price_sell != "-" and price_sell.strip() != ""
+            has_rent = price_rent != "-" and price_rent.strip() != ""
+            
+            if has_sell and has_rent:
+                computed_type = "ขายและเช่า"
+            elif has_sell:
+                computed_type = "ขาย"
+            elif has_rent:
+                computed_type = "เช่า"
+            else:
+                computed_type = ai_evaluation.get("type", "-")
 
             # จัดลำดับข้อมูล 26 คอลัมน์ (เพิ่ม Column Y: โหลดรูป, Column Z: ประเภททรัพย์)
             row_to_append = [
-                raw_data.get("scraped_date", "-"),           # 1. วันที่ลง/บันทึก (จากเว็บ/บอท) (A)
+                current_time,                                # 1. วันที่ลง/บันทึก (จากเว็บ/บอท) (A)
                 "-",                                         # 2. วันที่โทร (B)
                 "New",                                       # 3. สถานะการโทร (C)
                 "-",                                         # 4. ขอสแกน (D)
@@ -114,17 +131,17 @@ def main():
                 ai_evaluation.get("house_number", "-"),      # 12. เลขที่ห้อง (จากเว็บ) (L)
                 ai_evaluation.get("floor", "-"),             # 13. ชั้น (จากเว็บ) (M)
                 ai_evaluation.get("bed_bath", "-"),          # 14. Unit Type (จากเว็บ) (N)
-                ai_evaluation.get("type", "-"),              # 15. S or R (จากเว็บ) (O)
-                ai_evaluation.get("price", "-") if not is_rent else "-", # 16. ราคาขาย (จากเว็บ) (P)
-                ai_evaluation.get("price", "-") if is_rent else "-",     # 17. ราคาเช่า (จากเว็บ) (Q)
+                computed_type,                               # 15. S or R (จากเว็บ) (O)
+                price_sell,                                  # 16. ราคาขาย (จากเว็บ) (P)
+                price_rent,                                  # 17. ราคาเช่า (จากเว็บ) (Q)
                 ai_evaluation.get("size", "-"),              # 18. Area (จากเว็บ) (R)
                 ai_evaluation.get("phone_number", "-"),      # 19. เบอร์โทรเจ้าของ (จากเว็บ) (S)
                 ai_evaluation.get("customer_name", "-"),     # 20. ชื่อเจ้าของ (จากเว็บ) (T)
-                raw_data.get("url", ""),                     # 21. ลิงค์ (จากเว็บ) (U)
+                raw_data.get("url", "-"),                                    # 21. ลิงค์ (จากเว็บ) (U)
                 "-",                                         # 22. Remark (V)
                 "-",                                         # 23. Feedback (W)
                 ", ".join(raw_data.get("images", [])),       # 24. ภาพห้อง (จากเว็บ) (X)
-                drive_link,                                  # 25. โหลดรูป (Y)
+                f'=HYPERLINK("{drive_link}", "คลิกโหลดรูป")' if drive_link and drive_link != "-" else "-", # 25. โหลดรูป (Y)
                 selected_type                                # 26. ประเภททรัพย์ (Z)
             ]
             
