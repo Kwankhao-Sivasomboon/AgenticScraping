@@ -166,8 +166,13 @@ class ScraperAgent:
             
             popup_opened = False
             for attempt in range(3):
-                # เผื่อช่อง input แบบเดิมโดนซ่อน ให้ลอง evaluate click
-                page.evaluate("let box = document.getElementById('box-input-search'); if(box) box.click();")
+                try:
+                    # ลองคลิกผ่าน Playwright แบบบังคับก่อน
+                    page.locator('#box-input-search').click(timeout=3000, force=True)
+                except:
+                    # ถ้าไม่ได้ค่อยใช้ JS
+                    page.evaluate("let box = document.getElementById('box-input-search'); if(box) box.click();")
+                    
                 self.random_sleep(1.5, 2.5)
                 
                 if search_input.is_visible():
@@ -260,7 +265,7 @@ class ScraperAgent:
                         let p = '0'; \
                         let parent = a.closest('.box-istock-item, .istock-item, .item-list, .istock-list, .istock_topic_border, .istock-lists'); \
                         if(parent) { \
-                            let priceEl = parent.querySelector('.text_price, .price, .font-price'); \
+                            let priceEl = parent.querySelector('.listing_cost .text_price, .text_price, .price, .font-price, .istock-price, .price-detail'); \
                             if(priceEl) p = priceEl.innerText || priceEl.textContent; \
                         } \
                         return {url: a.href, price: p}; \
@@ -325,15 +330,16 @@ class ScraperAgent:
                         body_locator.wait_for(state='attached', timeout=10000)
                         raw_text = body_locator.inner_text()
                         
-                        # ดูดชื่อเจ้าของจาก HTML #nameOwner label ที่ซ่อนอยู่
+                        # ดูดชื่อเจ้าของจาก HTML #nameOwner label
                         owner_name = "-"
                         try:
-                            owner_locator = dp.locator('#nameOwner label').first
-                            if owner_locator.is_visible(timeout=2000):
-                                owner_name = owner_locator.inner_text().strip()
-                                # ถ้ามันมี ... ต่อท้าย ให้ตัดออก หรือถ้าไม่อยากตัดก็ปล่อยไว้
-                                if owner_name.endswith('...'):
-                                    owner_name = owner_name[:-3].strip()
+                            # ใช้ evaluate วิ่งเข้า DOM โดยตรงกันปัญหา is_visible timeout ของ Playwright
+                            owner_name = dp.evaluate('''() => {
+                                let el = document.querySelector("label[onclick*='gotoReviewpage']") || document.querySelector("#nameOwner label") || document.querySelector("#nameOwner");
+                                return el ? el.innerText.trim() : "-";
+                            }''')
+                            if owner_name.endswith('...'):
+                                owner_name = owner_name[:-3].strip()
                         except:
                             pass
                         
