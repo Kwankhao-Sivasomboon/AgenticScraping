@@ -1,6 +1,8 @@
 import os
 import time
 import random
+import re
+from datetime import datetime
 from playwright.sync_api import sync_playwright
 from playwright_stealth import stealth_sync
 from config import MAX_ITEMS_PER_RUN, SKIP_KEYWORDS, MAX_PRICE_LIMITS
@@ -24,10 +26,10 @@ class ScraperAgent:
             page.evaluate("""
                 var closeBtns = document.querySelectorAll('.btn-close, .close, #popup-close, [onclick*="closeBanner"]');
                 closeBtns.forEach(btn => { try { btn.click(); } catch(e) {} });
-                var backdrops = document.querySelectorAll('.modal-backdrop');
-                backdrops.forEach(el => { el.style.setProperty('display', 'none', 'important'); });
-                document.body.classList.remove('modal-open');
-                document.body.style.overflow = 'auto';
+                // var backdrops = document.querySelectorAll('.modal-backdrop');
+                // backdrops.forEach(el => { el.style.setProperty('display', 'none', 'important'); });
+                // document.body.classList.remove('modal-open');
+                // document.body.style.overflow = 'auto';
             """)
         except: pass
 
@@ -78,18 +80,17 @@ class ScraperAgent:
             
             # กดยืนยันเพื่อเข้าสู่ระบบ
             page.get_by_role("button", name="ดำเนินการต่อ").click()
-            self.random_sleep(5, 7)
             
-            # ตรวจสอบว่ากลับมาหน้า Dashboard หรือยัง
-            if "member_istock" not in page.url:
-                page.goto('https://www.livinginsider.com/member_istock.php', wait_until='domcontentloaded')
-                self.random_sleep(3, 5)
-
-            if page.locator("#btn_dropdown_ownertype").is_visible():
+            # 🌟 แก้ไข: ใช้ wait_for แทน is_visible ทันที
+            print("⏳ [Login] กำลังรอหน้า Dashboard โหลด...")
+            try:
+                # รอให้ปุ่มบนหน้า dashboard ปรากฏ (ให้เวลาสูงสุด 15 วิ)
+                page.wait_for_selector("#btn_dropdown_ownertype", state='visible', timeout=15000)
                 context.storage_state(path=self.state_file)
                 print("✅ [Login] สำเร็จและบันทึกเซสชันเรียบร้อย!")
-            else:
-                print("❌ [Login] ล้มเหลว อาจติด Captcha หรือรหัสผ่านผิด")
+            except:
+                print("❌ [Login] ล้มเหลว อาจติด Captcha หรือโหลดหน้าเว็บไม่ทัน")
+                return False # ควร return False เพื่อให้บอทหยุดทำงาน หรือลองใหม่ ดีกว่าปล่อยให้ไปกดค้นหาแบบพังๆ
 
         except Exception as e:
             print(f"❌ [Login Error] เกิดข้อผิดพลาด: {e}")
@@ -157,59 +158,40 @@ class ScraperAgent:
                 print(f"❌ Selection failed completely: {js_e}")
 
     def search_zone(self, page, zone_keyword="บางนา"):
-        """เน้นการ 'บังคับ' เปิดหน้าต่างค้นหา และคลิกเลือกจากรายการที่เว็บแนะนำ"""
-        print(f"🔍 [Search] กำลังพยายามเปิดช่องค้นหาสำหรับ: {zone_keyword}")
+        print(f"🔍 [Search] เริ่มกระบวนการค้นหา: {zone_keyword}")
         try:
-            # 1. คลิกกล่องค้นหาหลัก (ลองทั้งวิธีปกติ และวิธีส่ง Event คลิกโดยตรง)
-            trigger_box = page.locator("#box-input-search").first
-            trigger_box.wait_for(state='visible', timeout=10000)
+            # 1. กดให้ pop up ขึ้นมา
+            print("1️⃣ คลิกเปิด Popup...")
+            # ยิง JavaScript เปิด Popup เพื่อความชัวร์ที่สุด เพราะกล่องเดิมอาจจะโดนทับ
+            page.evaluate("let box = document.getElementById('box-input-search'); if(box) box.click();")
+            self.random_sleep(1, 2)
             
-            # ย้ำ 2 รอบเพื่อให้หน้าต่างเปิดแน่นอน
-            trigger_box.click(force=True)
-            self.random_sleep(0.5, 1)
-            
-            # 2. ตรวจเช็คว่าช่องพิมพ์โผล่มาหรือยัง
+            # 2. คลิกที่ช่องพิมพ์ใน Popup อีกที
+            print("2️⃣ รอช่องพิมพ์ #search_zone")
             search_input = page.locator("#search_zone").first
-            if not search_input.is_visible():
-                print("⚠️  หน้าต่างไม่เด้ง กำลังใช้แผนสำรองคลิกที่ตัวอักษร 'ค้นหา'...")
-                page.locator(".placeholder-box").first.click(force=True)
-            
-            search_input.wait_for(state='visible', timeout=5000)
-            print("✅ [Search] ช่องพิมพ์ปรากฏแล้ว")
-
-            # 3. คลิกล้างค่าและเริ่มพิมพ์แบบทีละตัว
+            search_input.wait_for(state='visible', timeout=10000)
             search_input.click(force=True)
             search_input.fill("")
+
+            # 3. พิมพ์ด้วย delay 150ms ตามที่คุณต้องการ
+            print(f"3️⃣ เริ่มพิมพ์: {zone_keyword}")
             search_input.press_sequentially(zone_keyword, delay=150)
-            
-            # *** จุดชี้เป็นชี้ตาย: ต้องรอให้ Autocomplete เด้งขึ้นมา ***
-            print(f"⏳ [Search] รอรายการแนะนำสำหรับ '{zone_keyword}'...")
+
+            # 4. หยุดรอให้เว็บดึง Autocomplete (สำคัญมาก)
             self.random_sleep(3, 4) 
 
-            # 4. บังคับคลิกที่ตัวเลือกแรกที่เว็บแนะนำ (LivingInsider บังคับให้เลือกจากลิสต์)
-            try:
-                # มองหาแถบรายการแนะนำที่เด้งขึ้นมาใต้ช่องพิมพ์
-                suggestion = page.locator(".tt-suggestion, .autocomplete-suggestion").first
-                if suggestion.is_visible(timeout=3000):
-                    print("🎯 [Search] พบรายการแนะนำ กำลังคลิกเลือก...")
-                    suggestion.click(force=True)
-                    self.random_sleep(1, 2)
-            except:
-                print("⚠️  ไม่พบรายการแนะนำ จะลองกด Enter ตรงๆ")
-
-            # 5. ส่งคำสั่ง Enter เพื่อเริ่มค้นหาข้อมูลใหม่
-            print("⌨️  [Search] กำลังส่งคำสั่ง Enter...")
+            # 5. แล้ว Enter
+            print("4️⃣ กด Enter!")
             search_input.press('Enter')
 
-            # 6. รอให้ข้อมูลรีเฟรช (สำคัญมาก กันบอทรีบวิ่งไปดึงข้อมูลหน้าเก่า)
-            print("⏳ [Search] รอข้อมูลใหม่โหลดสักครู่...")
+            # 6. รอให้ข้อมูลรีเฟรช
             self.random_sleep(6, 8) 
             
             return True
             
         except Exception as e:
-            print(f"❌ [Search Error] ทำงานไม่ครบขั้นตอน: {e}")
-            return True
+            print(f"❌ [Search Error]: {e}")
+            return False
 
     def scrape_living_insider(self, target_url, property_type="คอนโด", zone="อ่อนนุช"):
         results = []
@@ -243,21 +225,42 @@ class ScraperAgent:
             current_page = 1
             while len(results) < MAX_ITEMS_PER_RUN:
                 print(f"\n--- Page {current_page} (Total: {len(results)}) ---")
-                try: page.wait_for_selector("a[href*='istockdetail/']", timeout=10000)
-                except: break
+                
+                # 🌟 แก้ไขจุดที่ 1: เปลี่ยนมารอดูกล่องประกาศแทนลิงก์เจาะจง เผื่อเว็บเปลี่ยน URL
+                try: 
+                    # เปลี่ยนมารอลิงก์ประกาศเลย แทนรอกล่องครอบ เพราะคลาสกล่องชอบโดนปรับ
+                    page.wait_for_selector("a.istock_detail_url, a[href*='istockdetail'], a[href*='livingdetail']", state='attached', timeout=15000)
+                    page.wait_for_timeout(2000) # เผื่อดึงข้อมูลแบบ AJAX ให้กล่องราคามันโหลดเสร็จก่อน
+                except: 
+                    print("⚠️ โหลดตารางประกาศไม่ทัน หรือไม่มีข้อมูลแล้ว (Timeout)")
+                    break
 
+                # 🌟 แก้ไขจุดที่ 2: ดึงข้อมูลโดยกวาดลิงก์ที่กว้างขึ้น (รองรับทั้ง /detail และ istockdetail)
                 items = page.evaluate("(skipKeywords) => { \
-                    return Array.from(document.querySelectorAll(\"a[href*='istockdetail/']\")).map(a => { \
-                        let p = a.closest('.box-istock-item')?.querySelector('.text_price')?.innerText || '0'; \
+                    const links = Array.from(document.querySelectorAll(\"a.istock_detail_url, a[href*='/detail'], a[href*='istockdetail'], a[href*='livingdetail']\")); \
+                    return links.map(a => { \
+                        let p = '0'; \
+                        let parent = a.closest('.box-istock-item, .istock-item, .item-list, .istock-list, .istock_topic_border, .istock-lists'); \
+                        if(parent) { \
+                            let priceEl = parent.querySelector('.text_price, .price, .font-price'); \
+                            if(priceEl) p = priceEl.innerText || priceEl.textContent; \
+                        } \
                         return {url: a.href, price: p}; \
-                    }); \
+                    }).filter(item => !item.url.includes('javascript') && item.url.includes('http')); \
                 }", SKIP_KEYWORDS)
 
                 valid_urls = []
+                seen_urls = set()
                 limit = MAX_PRICE_LIMITS.get(property_type, 999999999) 
                 
                 for item in items:
                     url = item['url']
+                    
+                    # กันลิงก์ซ้ำ (1 ประกาศอาจจะมีหลายลิงก์ ทำให้ล็อกและเช็คราคาซ้ำหลายรอบ)
+                    if url in seen_urls:
+                        continue
+                    seen_urls.add(url)
+                    
                     raw_price = str(item['price']).replace('฿', '').replace(',', '').strip()
                     
                     try:
@@ -267,7 +270,9 @@ class ScraperAgent:
                             clean_price = raw_price.replace('ล้าน', '').strip()
                             p_val = float(clean_price) * 1000000
                         else:
-                            p_val = float(''.join(c for c in raw_price if c.isdigit() or c == '.'))
+                            # ดึงเฉพาะตัวเลขและจุดทศนิยม
+                            digits = ''.join(c for c in raw_price if c.isdigit() or c == '.')
+                            if digits: p_val = float(digits)
                         
                         if p_val > limit:
                             print(f"🚫 ตัดทิ้ง: ราคา {p_val:,.0f} (เกินงบ {limit:,.0f})")
@@ -277,6 +282,7 @@ class ScraperAgent:
                     except Exception as e:
                         valid_urls.append(url)
 
+                # ทำการ Unique URL เพื่อกันการขูดข้อมูลซ้ำ
                 for url in list(set(valid_urls)):
                     if len(results) >= MAX_ITEMS_PER_RUN: 
                         break
@@ -285,7 +291,7 @@ class ScraperAgent:
                     dp = context.new_page()
                     stealth_sync(dp)
                     try:
-                        # 1. รอให้หน้าโหลดสมบูรณ์ขึ้นอีกนิด (เปลี่ยนจาก domcontentloaded เป็นการรอให้เครือข่ายนิ่ง)
+                        # 1. รอให้หน้าโหลดสมบูรณ์ขึ้นอีกนิด
                         dp.goto(url, wait_until='load', timeout=45000)
                         self.random_sleep(2, 3)
                         self.close_banners(dp)
@@ -311,6 +317,7 @@ class ScraperAgent:
                     finally: 
                         dp.close()
 
+                # Pagination
                 next_btn = page.locator(f"ul.pagination li a:has-text('{current_page + 1}')").first
                 if next_btn.is_visible():
                     next_btn.click(force=True)

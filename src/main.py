@@ -100,7 +100,7 @@ def main():
 
             # จัดลำดับข้อมูล 26 คอลัมน์ (เพิ่ม Column Y: โหลดรูป, Column Z: ประเภททรัพย์)
             row_to_append = [
-                ai_evaluation.get("listing_date", "-"),      # 1. วันที่ลง (จากเว็บ) (A)
+                raw_data.get("scraped_date", "-"),           # 1. วันที่ลง/บันทึก (จากเว็บ/บอท) (A)
                 "-",                                         # 2. วันที่โทร (B)
                 "New",                                       # 3. สถานะการโทร (C)
                 "-",                                         # 4. ขอสแกน (D)
@@ -123,7 +123,7 @@ def main():
                 raw_data.get("url", ""),                     # 21. ลิงค์ (จากเว็บ) (U)
                 "-",                                         # 22. Remark (V)
                 "-",                                         # 23. Feedback (W)
-                ai_evaluation.get("images_url", "-"),        # 24. ภาพห้อง (จากเว็บ) (X)
+                ", ".join(raw_data.get("images", [])),       # 24. ภาพห้อง (จากเว็บ) (X)
                 drive_link,                                  # 25. โหลดรูป (Y)
                 selected_type                                # 26. ประเภททรัพย์ (Z)
             ]

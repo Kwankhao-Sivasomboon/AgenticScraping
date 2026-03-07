@@ -38,16 +38,12 @@ class EvaluatorAgent:
         8. "size": ขนาดพื้นที่ (เช่น 30 ตร.ม.)
         9. "bed_bath": จำนวนห้องนอน และห้องน้ำ (เช่น "1 นอน 1 น้ำ") สำหรับใส่ในช่อง Unit Type
         10. "house_number": บ้านเลขที่ หรือเลขที่ห้อง ถ้าไม่พบใส่ "-"
-        11. "images_url": นำ URL รูปภาพทั้งหมดคั่นด้วยคอมม่า
         
         ข้อความดิบ (Raw Text Input):
         {parsed_data.get('raw_text', '')}
         
         ข้อมูลการติดต่อจากไอคอน (Contact Info From Icon):
         {parsed_data.get('contact_icon', 'ไม่พบ')}
-        
-        Link รูปภาพ (Images URL Input):
-        {', '.join(parsed_data.get('images', []))}
         
         กรุณาส่งคืนผลลัพธ์เป็น JSON Object ห้ามมี markdown ครอบ
         """
@@ -81,6 +77,5 @@ class EvaluatorAgent:
             "type": "-",
             "size": "-",
             "bed_bath": "-",
-            "house_number": "-",
-            "images_url": "-"
+            "house_number": "-"
         }
