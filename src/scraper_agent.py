@@ -325,10 +325,126 @@ class ScraperAgent:
                         self.random_sleep(2, 3)
                         self.close_banners(dp)
                         
-                        # 2. ใช้ locator ดึงข้อความแทน evaluate ป้องกัน context destroy
-                        body_locator = dp.locator('body')
-                        body_locator.wait_for(state='attached', timeout=10000)
-                        raw_text = body_locator.inner_text()
+                        # 2. กดปุ่ม "แสดงรายละเอียดเพิ่มเติม" หรือ "ข้อมูลเพิ่มเติม..."
+                        try:
+                            dp.evaluate("""() => {
+                                let btns = document.querySelectorAll('.box-open-text a, .btn-open-text, [onclick*="openModalMoreDetail"], .font_title_more, .font_title_more_mobile');
+                                btns.forEach(b => { try { b.click(); } catch(e){} });
+                                
+                                let spans = Array.from(document.querySelectorAll('span, a'));
+                                spans.forEach(s => {
+                                    if(s.innerText && (s.innerText.includes('แสดงรายละเอียดเพิ่มเติม') || s.innerText.includes('ข้อมูลเพิ่มเติม...'))) {
+                                        try { s.click(); } catch(e){}
+                                    }
+                                });
+                            }""")
+                            self.random_sleep(1, 1.5)
+                        except:
+                            pass
+
+                        # 2.1 กดปุ่ม "แสดงเบอร์โทร" (ถ้ามี) เพื่อให้เบอร์มือถือตัวจริงโผล่ออกมา
+                        # ใช้ JS คลิกให้หมดทุกตัวในหน้า ป้องกันปัญหา Element กั้น หรือ Visibility
+                        try:
+                            dp.evaluate("""() => {
+                                let btns = document.querySelectorAll('.p-phone-contact, .btn-show-phone, [onclick*="show_phone"]');
+                                btns.forEach(b => { try { b.click(); } catch(e){} });
+                                
+                                let links = Array.from(document.querySelectorAll('a'));
+                                links.forEach(a => {
+                                    if(a.innerText && a.innerText.includes('คลิกเพื่อดูเบอร์โทร')) {
+                                        try { a.click(); } catch(e){}
+                                    }
+                                });
+                            }""")
+                            self.random_sleep(2, 3) # รอให้ network โหลดเบอร์มาแปะ
+                        except:
+                            pass
+
+                        # 2.2 เช็กเบอร์โทรในเนื้อหาตีกรอบว่ามันโผล่มาหรือยัง
+                        found_phone_in_text = False
+                        try:
+                            # ขอดึงข้อความชั่วคราวฉบับด่วนเพื่อเช็กเบอร์ที่เพิ่งโผล่ออกมา
+                            temp_locator = dp.locator('#zone_detail_istock, .detail-istock, .box-detail-istock, #detail-contract-istock').first
+                            if temp_locator.is_visible(timeout=2000):
+                                temp_text = temp_locator.inner_text()
+                                # หาเบอร์โทรที่ขึ้นต้น 06, 08, 09 (อาจมี - คั่น)
+                                if re.search(r'0[689]\d{1}-?\d{3}-?\d{4}', temp_text):
+                                    found_phone_in_text = True
+                        except:
+                            pass
+
+                        # 2.3 ถ้าไม่เจอเบอร์ในเนื้อหา ให้ลองกดไอคอนโทรศัพท์ด้านข้าง
+                        hidden_contacts = []
+                        if not found_phone_in_text:
+                            try:
+                                side_phone_btn = dp.locator("a#seephone-detail-new-design, a.co-tel").first
+                                if side_phone_btn.is_visible(timeout=2000):
+                                    side_phone_btn.click(force=True)
+                                    self.random_sleep(2.0, 3.0) # รอนานหน่อย เพราะเป็น Popup ที่ต้องโหลดจาก Server
+                                    
+                                    # ดูดเบอร์จาก Modal ยืนยัน
+                                    phone_modal_val = dp.locator("#phone_number_modal_show, #href_phone_modal").first
+                                    if phone_modal_val.is_visible(timeout=3000):
+                                        hidden_contacts.append(f"เบอร์โทรศัพท์ (สกัดจากไอคอนด่วน): {phone_modal_val.inner_text().strip()}")
+                                        
+                                    # ปิด Modal พับเก็บ (ถ้ามีปุ่มปิด หรือกด Esc)
+                                    dp.keyboard.press('Escape')
+                                    self.random_sleep(0.5, 1)
+
+                                # สกัด LINE ID จากไอคอน Line
+                                side_line_btn = dp.locator("a.co-line").first
+                                if side_line_btn.is_visible(timeout=2000):
+                                    line_url = side_line_btn.get_attribute("data-url")
+                                    if line_url:
+                                        hidden_contacts.append(f"LINE ID (สกัดจากไอคอนด่วน): {line_url}")
+                            except Exception as e:
+                                pass
+
+                        # รอให้ทุกอย่างนิ่งสนิทก่อนกวาดข้อความ
+                        self.random_sleep(1.5, 2)
+                        
+                        # 3. ใช้ locator ดึงข้อความ "เฉพาะส่วนเนื้อหาประกาศ" (ป้องกันขยะจาก Header/Footer)
+                        raw_text = ""
+                        try:
+                            # ดึงด้วย JavaScript เพื่อกวาดเฉพาะส่วนที่ต้องการจริงๆ เท่านั้นแบบเป็นชิ้นๆ
+                            raw_text = dp.evaluate("""() => {
+                                let parts = [];
+                                
+                                // 1. หัวข้อและชื่อโครงการ
+                                let titles = document.querySelectorAll('.box-show-header-project, .box-show-title-detail, h1.show-title');
+                                titles.forEach(el => { if(el.innerText && el.innerText.trim()) parts.push(el.innerText.trim()); });
+                                
+                                // 1.5 ราคา (ดึงมาไว้เป็นข้อมูลอ้างอิงเผื่อในรายละเอียดไม่มี)
+                                let prices = document.querySelectorAll('.box_full_price, .show_price_topic');
+                                prices.forEach(el => { if(el.innerText && el.innerText.trim()) parts.push('[ราคาที่สกัดจากระบบ]: ' + el.innerText.replace(/\\n/g, ' ').trim()); });
+                                
+                                // 2. ข้อมูลอสังหาฯ (ห้องนอน ชั้น ขนาด ฯลฯ)
+                                let props = document.querySelectorAll('.detail-list-property, .detail_property_list_new, .box-detail-istock');
+                                props.forEach(el => { if(el.innerText && el.innerText.trim()) parts.push(el.innerText.trim()); });
+                                
+                                // 3. รายละเอียดแบบเต็ม
+                                let desc = document.querySelectorAll('#desc-text-nl, .new-detail-desc, #zone_detail_istock, .detail-istock, #detail-contract-istock');
+                                desc.forEach(el => { if(el.innerText && el.innerText.trim()) parts.push(el.innerText.trim()); });
+                                
+                                return parts.join('\\n\\n');
+                            }""")
+                        except:
+                            pass
+                            
+                        if not raw_text or len(raw_text.strip()) < 10:
+                            # ถ้าหาไม่เจอจริงๆ ค่อยดึงจากกล่องที่กว้างขึ้นมาอีกหน่อย หลีกเลี่ยง body ถ้าเป็นไปได้
+                            try:
+                                fallback_locator = dp.locator('.container, .blog-detail, main').first
+                                fallback_locator.wait_for(state='attached', timeout=5000)
+                                raw_text = fallback_locator.inner_text()
+                            except:
+                                body_locator = dp.locator('body')
+                                body_locator.wait_for(state='attached', timeout=5000)
+                                raw_text = body_locator.inner_text()
+                        
+                        # นำเบอร์โทรและ LINE ที่สกัดได้แบบพิเศษ แปะทับต่อท้ายข้อความดิบไปเลย Gemini จะได้อ่านเจอชัวร์ๆ
+                        if hidden_contacts:
+                            raw_text += "\n\n=== ข้อมูลติดต่อเพิ่มเติม (Extracted from Hidden Elements) ===\n" + "\n".join(hidden_contacts)
                         
                         # ดูดชื่อเจ้าของจาก HTML #nameOwner label
                         owner_name = "-"
@@ -363,7 +479,7 @@ class ScraperAgent:
                                     if (['avatar', 'icon', 'banner', 'logo'].some(v => lowerSrc.includes(v))) return false;
                                     return src.includes('livinginsider.com') && (src.includes('og_detail') || src.includes('upload/topic'));
                                 });
-                                return [...new Set(validUrls)].slice(0, 15); // กันเหนียวเผื่อรูปเยอะ เอาแค่ 15 รูปแรก
+                                return [...new Set(validUrls)].slice(0, 50); // ดึงรูปภาพสูงสุด 50 รูป
                             }''')
                             # ปิด Gallery ทิ้งหลังกวาดรูปเสร็จ
                             dp.keyboard.press('Escape')
@@ -373,13 +489,14 @@ class ScraperAgent:
                             image_urls = []
                         # =====================================
                         
-                        # 3. เซฟลง results เฉพาะกรณีที่ดึง raw_text ได้จริง
+                        # 4. เซฟลง results เฉพาะกรณีที่ดึง raw_text ได้จริง
                         if raw_text and len(raw_text.strip()) > 0:
                             results.append({
                                 "listing_id": url.split('/')[-1].replace('.html', ''), 
                                 "url": url, 
                                 "images": image_urls, # ใส่ข้อมูลรูปลงไป
                                 "owner_name": owner_name, # นำชื่อที่สกัดได้แนบไปด้วย
+                                "extracted_phone": ", ".join(hidden_contacts) if hidden_contacts else "-", # ส่งเบอร์และไลน์ที่สกัดได้ทั้งหมดให้ Gemini
                                 "raw_text": raw_text[:5000]
                             })
                             print(f"✅ บันทึกสำเร็จ (Total: {len(results)}/{MAX_ITEMS_PER_RUN})")

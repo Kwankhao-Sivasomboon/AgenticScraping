@@ -138,7 +138,7 @@ def main():
                 ai_evaluation.get("phone_number", "-"),      # 19. เบอร์โทรเจ้าของ (จากเว็บ) (S)
                 ai_evaluation.get("customer_name", "-"),     # 20. ชื่อเจ้าของ (จากเว็บ) (T)
                 raw_data.get("url", "-"),                                    # 21. ลิงค์ (จากเว็บ) (U)
-                "-",                                         # 22. Remark (V)
+                ai_evaluation.get("line_id", "-") if ai_evaluation.get("line_id", "-") != "-" else "-", # 22. Remark (V) (เก็บ Line ID แทน)
                 "-",                                         # 23. Feedback (W)
                 ", ".join(raw_data.get("images", [])),       # 24. ภาพห้อง (จากเว็บ) (X)
                 f'=HYPERLINK("{drive_link}", "คลิกโหลดรูป")' if drive_link and drive_link != "-" else "-", # 25. โหลดรูป (Y)
