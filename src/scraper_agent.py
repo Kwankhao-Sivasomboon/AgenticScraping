@@ -221,7 +221,7 @@ class ScraperAgent:
             return False
 
     def scrape_living_insider(self, target_url, property_type="คอนโด", zone="อ่อนนุช"):
-        results = []
+        yielded_count = 0
         launch_args = {"headless": True, "args": ["--no-sandbox", "--disable-setuid-sandbox"]}
         if self.use_proxy and self.proxy_server:
             launch_args["proxy"] = {"server": self.proxy_server, "username": self.proxy_username, "password": self.proxy_password}
@@ -250,8 +250,8 @@ class ScraperAgent:
                 print(f"⚠️ Filtering error: {e}")
 
             current_page = 1
-            while len(results) < MAX_ITEMS_PER_RUN:
-                print(f"\n--- Page {current_page} (Total: {len(results)}) ---")
+            while yielded_count < MAX_ITEMS_PER_RUN:
+                print(f"\n--- Page {current_page} (Total Collected: {yielded_count}) ---")
                 
                 # 🌟 แก้ไขจุดที่ 1: เปลี่ยนมารอดูกล่องประกาศแทนลิงก์เจาะจง เผื่อเว็บเปลี่ยน URL
                 try: 
@@ -317,7 +317,7 @@ class ScraperAgent:
 
                 # ทำการ Unique URL เพื่อกันการขูดข้อมูลซ้ำ
                 for url in list(set(valid_urls)):
-                    if len(results) >= MAX_ITEMS_PER_RUN: 
+                    if yielded_count >= MAX_ITEMS_PER_RUN: 
                         break
                         
                     # Early Deduplication: ดึง ID จาก URL และตรวจใน Firestore ทันที! ป้องกันการถูกแบนและไม่ต้องเสียเวลาโหลดหน้าเดิม
@@ -499,17 +499,18 @@ class ScraperAgent:
                             image_urls = []
                         # =====================================
                         
-                        # 4. เซฟลง results เฉพาะกรณีที่ดึง raw_text ได้จริง
+                        # 4. ส่งข้อมูลออกทันทีด้วย yield (ช่วยประหยัด RAM และเซฟได้ทันที)
                         if raw_text and len(raw_text.strip()) > 0:
-                            results.append({
+                            yield {
                                 "listing_id": url.split('/')[-1].replace('.html', ''), 
                                 "url": url, 
-                                "images": image_urls, # ใส่ข้อมูลรูปลงไป
-                                "owner_name": owner_name, # นำชื่อที่สกัดได้แนบไปด้วย
-                                "extracted_phone": ", ".join(hidden_contacts) if hidden_contacts else "-", # ส่งเบอร์และไลน์ที่สกัดได้ทั้งหมดให้ Gemini
+                                "images": image_urls,
+                                "owner_name": owner_name,
+                                "extracted_phone": ", ".join(hidden_contacts) if hidden_contacts else "-",
                                 "raw_text": raw_text[:5000]
-                            })
-                            print(f"✅ บันทึกสำเร็จ (Total: {len(results)}/{MAX_ITEMS_PER_RUN})")
+                            }
+                            yielded_count += 1
+                            print(f"✅ ขูดสำเร็จ (รายการที่ {yielded_count}/{MAX_ITEMS_PER_RUN}) - กำลังส่งไปวิเคราะห์...")
                         else:
                             print(f"⚠️ เนื้อหาว่างเปล่า ข้าม {url}")
                             
@@ -536,4 +537,3 @@ class ScraperAgent:
                 else: break
 
             browser.close()
-        return results
