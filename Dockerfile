@@ -26,7 +26,13 @@ RUN playwright install chromium
 RUN playwright install-deps chromium
 
 # Copy all the source code into the container
-COPY ./src ./src
+COPY . .
 
-# Set the entry point to run the script
-CMD ["python", "src/main.py"]
+# Set environment variable for PYTHONPATH to find modules in src/
+ENV PYTHONPATH="${PYTHONPATH}:/app/src"
+
+# Expose the port used by the server
+EXPOSE 8080
+
+# Run the server using uvicorn
+CMD ["uvicorn", "src.server:app", "--host", "0.0.0.0", "--port", "8080", "--timeout-keep-alive", "600"]

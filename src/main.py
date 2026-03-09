@@ -5,10 +5,7 @@ from evaluator_agent import EvaluatorAgent
 from firestore_service import FirestoreService
 from storage_service import StorageService
 
-def main():
-    print("=== Starting Agentic AI Scraping Workflow (Detailed Hybrid) ===")
-    
-    # 1. Initialize Services
+def init_services():
     try:
         sheets = SheetsService()
         scraper = ScraperAgent()
@@ -17,18 +14,36 @@ def main():
         storage_svc = StorageService()
     except Exception as e:
         print(f"Error initializing services: {e}")
-        return
+        return None
+
+    return {
+        "sheets": sheets,
+        "scraper": scraper,
+        "evaluator": evaluator,
+        "firestore": firestore,
+        "storage_svc": storage_svc
+    }
+
+def run_scraping_job(selected_type, selected_zone, max_items_override=None):
+    from config import MAX_RETRIES
+    import config
+    
+    if max_items_override is not None:
+        config.MAX_ITEMS_PER_RUN = max_items_override
+
+    services = init_services()
+    if not services:
+        return {"error": "Failed to initialize services"}
+        
+    sheets = services["sheets"]
+    scraper = services["scraper"]
+    evaluator = services["evaluator"]
+    firestore = services["firestore"]
+    storage_svc = services["storage_svc"]
 
     # 2. Ingestion Phase: Scraper Agent 
-    print("\n--- Ingestion Phase ---")
-    # For testing, we are just executing the scraper setup directly with Playwright 
+    print(f"\n--- Ingestion Phase: '{selected_type}' in '{selected_zone}' ---")
     target_url = "https://www.livinginsider.com/?srsltid=AfmBOooDgW_K_dldNP20QHs4sLi2OMdto01GWcucYKCxjlSbubJaGHqe"
-    
-    # You can now specify property type and zone using a Random Pick strategy
-    from config import PROPERTY_TYPES, TARGET_ZONES, MAX_RETRIES
-    
-    # สุ่มเลือกประเภทและโซน 1 แบบในการรอบการทำงานนี้เพื่อลดการโดนแบน
-    import random
     
     retries = 0
     total_scraped_session = 0
@@ -36,9 +51,6 @@ def main():
     total_saved_session = 0
     
     while retries < MAX_RETRIES:
-        selected_type = random.choice(PROPERTY_TYPES)
-        selected_zone = random.choice(TARGET_ZONES)
-        
         print(f"\n--- Agent Action: Searching for '{selected_type}' in '{selected_zone}' (Attempt {retries + 1}/{MAX_RETRIES}) ---")
 
         # scraper agent will login (if session not exist), and scrape raw details from specific URLs
@@ -172,9 +184,24 @@ def main():
 
     # Final Report
     print(f"\n=== Workflow Completed ===")
-    print(f"Total Scraped (Opened Detail Pages): {total_scraped_session}")
-    print(f"Total Skipped (Already in DB): {total_skipped_session}")
-    print(f"Total New Records Saved: {total_saved_session}")
+    print(f"Total Scraped: {total_scraped_session}")
+    print(f"Total Skipped: {total_skipped_session}")
+    print(f"Total Saved: {total_saved_session}")
+    
+    return {
+        "status": "success",
+        "scraped": total_scraped_session,
+        "skipped": total_skipped_session,
+        "saved": total_saved_session
+    }
+
+def main():
+    print("=== Starting Agentic AI Scraping Workflow (Detailed Hybrid) ===")
+    from config import PROPERTY_TYPES, TARGET_ZONES
+    import random
+    selected_type = random.choice(PROPERTY_TYPES)
+    selected_zone = random.choice(TARGET_ZONES)
+    run_scraping_job(selected_type, selected_zone)
 
 if __name__ == "__main__":
     main()
