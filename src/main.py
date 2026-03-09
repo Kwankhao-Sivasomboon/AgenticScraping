@@ -44,23 +44,16 @@ def main():
         # scraper agent will login (if session not exist), and scrape raw details from specific URLs
         scraped_listings = scraper.scrape_living_insider(target_url, property_type=selected_type, zone=selected_zone)
         
-        if not scraped_listings: # Handles both None and []
-            print(f"No property found for '{selected_type}' in '{selected_zone}' (ไม่พบข้อมูล). Instantly retrying...")
-            retries += 1
-            if retries >= MAX_RETRIES:
-                print("Max retries reached. Exiting scraping phase.")
-            continue
-            
-        print(f"\nCompleted Scraping Phase. Extracted details for {len(scraped_listings)} listings.")
-        total_scraped_session += len(scraped_listings)
-        
-        # 3. Validation, Intelligence & Action Phases
-        print("\n--- Validation, Intelligence & Storage Phases ---")
+        print("\n--- Processing Phase (Real-time Scraping & Saving) ---")
         
         new_records_added = 0
         skipped_records = 0
+        has_items = False
+
         
         for raw_data in scraped_listings:
+            has_items = True
+            total_scraped_session += 1
             listing_id = raw_data.get("listing_id")
             
             if not listing_id:
@@ -157,6 +150,13 @@ def main():
                 
         total_skipped_session += skipped_records
         total_saved_session += new_records_added
+        
+        if not has_items:
+            print(f"No property found or all items skipped for '{selected_type}' in '{selected_zone}'. Instantly retrying...")
+            retries += 1
+            if retries >= MAX_RETRIES:
+                print("Max retries reached. Exiting scraping phase.")
+            continue
         
         # Check if we should stop
         if new_records_added > 0:

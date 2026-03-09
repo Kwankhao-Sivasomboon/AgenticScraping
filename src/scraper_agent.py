@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 from playwright.sync_api import sync_playwright
 from playwright_stealth import stealth_sync
-from config import MAX_ITEMS_PER_RUN, SKIP_KEYWORDS, MAX_PRICE_LIMITS
+from config import MAX_ITEMS_PER_RUN, SKIP_KEYWORDS, MAX_PRICE_LIMITS, SHOW_BROWSER
 
 class ScraperAgent:
     def __init__(self):
@@ -16,6 +16,9 @@ class ScraperAgent:
         self.username = os.getenv('LIVING_INSIDER_USERNAME')
         self.password = os.getenv('LIVING_INSIDER_PASSWORD')
         self.state_file = "playwright_state.json"
+        
+        from firestore_service import FirestoreService
+        self.firestore = FirestoreService()
 
     def random_sleep(self, min_seconds=2, max_seconds=5):
         time.sleep(random.uniform(min_seconds, max_seconds))
@@ -215,10 +218,9 @@ class ScraperAgent:
             except:
                 pass
             return False
-
     def scrape_living_insider(self, target_url, property_type="คอนโด", zone="อ่อนนุช"):
-        results = []
-        launch_args = {"headless": False, "args": ["--no-sandbox", "--disable-setuid-sandbox"]}
+        yielded_count = 0
+        launch_args = {"headless": not SHOW_BROWSER, "args": ["--no-sandbox", "--disable-setuid-sandbox"]}
         if self.use_proxy and self.proxy_server:
             launch_args["proxy"] = {"server": self.proxy_server, "username": self.proxy_username, "password": self.proxy_password}
 
@@ -246,8 +248,8 @@ class ScraperAgent:
                 print(f"⚠️ Filtering error: {e}")
 
             current_page = 1
-            while len(results) < MAX_ITEMS_PER_RUN:
-                print(f"\n--- Page {current_page} (Total: {len(results)}) ---")
+            while yielded_count < MAX_ITEMS_PER_RUN:
+                print(f"\n--- Page {current_page} (Total Collected: {yielded_count}) ---")
                 
                 # 🌟 แก้ไขจุดที่ 1: เปลี่ยนมารอดูกล่องประกาศแทนลิงก์เจาะจง เผื่อเว็บเปลี่ยน URL
                 try: 
@@ -313,8 +315,14 @@ class ScraperAgent:
 
                 # ทำการ Unique URL เพื่อกันการขูดข้อมูลซ้ำ
                 for url in list(set(valid_urls)):
-                    if len(results) >= MAX_ITEMS_PER_RUN: 
+                    if yielded_count >= MAX_ITEMS_PER_RUN: 
                         break
+                        
+                    # Early Deduplication: Check if already scraped to dodge ban and save time
+                    listing_id = url.split('/')[-1].replace('.html', '')
+                    if getattr(self, 'firestore', None) and self.firestore.is_listing_exists(listing_id):
+                        print(f"⏭️ ข้ามการขูด (เคยบันทึกไว้แล้ว): {url}")
+                        continue
                     
                     print(f"Scraping: {url}")
                     dp = context.new_page()
@@ -489,24 +497,33 @@ class ScraperAgent:
                             image_urls = []
                         # =====================================
                         
-                        # 4. เซฟลง results เฉพาะกรณีที่ดึง raw_text ได้จริง
+                        # 4. ส่งข้อมูลออกทันทีด้วย yield (ช่วยประหยัด RAM และเซฟได้ทันที)
                         if raw_text and len(raw_text.strip()) > 0:
-                            results.append({
+                            yield {
                                 "listing_id": url.split('/')[-1].replace('.html', ''), 
                                 "url": url, 
-                                "images": image_urls, # ใส่ข้อมูลรูปลงไป
-                                "owner_name": owner_name, # นำชื่อที่สกัดได้แนบไปด้วย
-                                "extracted_phone": ", ".join(hidden_contacts) if hidden_contacts else "-", # ส่งเบอร์และไลน์ที่สกัดได้ทั้งหมดให้ Gemini
+                                "images": image_urls,
+                                "owner_name": owner_name,
+                                "extracted_phone": ", ".join(hidden_contacts) if hidden_contacts else "-",
                                 "raw_text": raw_text[:5000]
-                            })
-                            print(f"✅ บันทึกสำเร็จ (Total: {len(results)}/{MAX_ITEMS_PER_RUN})")
+                            }
+                            yielded_count += 1
+                            print(f"✅ ขูดสำเร็จ (รายการที่ {yielded_count}/{MAX_ITEMS_PER_RUN}) - กำลังส่งไปวิเคราะห์...")
                         else:
                             print(f"⚠️ เนื้อหาว่างเปล่า ข้าม {url}")
                             
                     except Exception as e:
                         print(f"❌ [Scrape Error] ข้าม {url}: {str(e).split('===========================')[0].strip()}")
                     finally: 
-                        dp.close()
+                        try:
+                            dp.close()
+                        except:
+                            pass
+                        # เคลียร์แท็บเด้งทั้งหมด (Popup/New Tab) ที่อาจโผล่มา
+                        for p_extra in context.pages:
+                            if p_extra != page:
+                                try: p_extra.close()
+                                except: pass
 
                 # Pagination
                 next_btn = page.locator(f"ul.pagination li a:has-text('{current_page + 1}')").first
@@ -517,4 +534,4 @@ class ScraperAgent:
                 else: break
 
             browser.close()
-        return results
+        # End of Generator
