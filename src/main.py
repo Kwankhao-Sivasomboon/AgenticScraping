@@ -71,89 +71,92 @@ def main():
                 print(f"SKIPPED ID {listing_id} - Already exists in Firestore.")
                 skipped_records += 1
                 continue
+            try:
+                print(f"\nPROCESSING NEW ID {listing_id} - Sending Detail Payload to Gemini...")
                 
-            print(f"\nPROCESSING NEW ID {listing_id} - Sending Detail Payload to Gemini...")
-            
-            # B. Intelligence Phase (Gemini Analysis)
-            ai_evaluation = evaluator.evaluate_listing(raw_data)
-            
-            # Create ZIP (WebP encoded) and upload to Firebase Storage
-            image_urls = raw_data.get("images", [])
-            drive_link = "-"
-            if image_urls:
-                drive_link = storage_svc.create_zip_and_upload(image_urls, listing_id)
-                if drive_link and drive_link != "-":
-                    print(f"📦 อัปโหลด ZIP รูปลง Cloud Storage เรียบร้อย! ลิงก์: {drive_link}")
+                # B. Intelligence Phase (Gemini Analysis)
+                ai_evaluation = evaluator.evaluate_listing(raw_data)
+                
+                # Create ZIP (WebP encoded) and upload to Firebase Storage
+                image_urls = raw_data.get("images", [])
+                drive_link = "-"
+                if image_urls:
+                    drive_link = storage_svc.create_zip_and_upload(image_urls, listing_id)
+                    if drive_link and drive_link != "-":
+                        print(f"📦 อัปโหลด ZIP รูปลง Cloud Storage เรียบร้อย! ลิงก์: {drive_link}")
+                        
+                # ยัดลิงก์เข้า raw_data ด้วยเพื่อให้ถูกเก็บบน Firestore
+                raw_data['image_zip_url'] = drive_link
+                
+                # C. Action Phase 1: Storage in Firestore (Main Storage)
+                print(f"Saving ID {listing_id} to Firestore...")
+                if firestore.save_listing(listing_id, raw_data, ai_evaluation):
+                    print(f"-> Saved ID {listing_id} to Firestore.")
+                else:
+                    print(f"-> FAILED saving ID {listing_id} to Firestore.")
                     
-            # ยัดลิงก์เข้า raw_data ด้วยเพื่อให้ถูกเก็บบน Firestore
-            raw_data['image_zip_url'] = drive_link
-            
-            # C. Action Phase 1: Storage in Firestore (Main Storage)
-            print(f"Saving ID {listing_id} to Firestore...")
-            if firestore.save_listing(listing_id, raw_data, ai_evaluation):
-                print(f"-> Saved ID {listing_id} to Firestore.")
-            else:
-                print(f"-> FAILED saving ID {listing_id} to Firestore.")
+                # E. Action Phase 2: Delivery to Google Sheets (Dashboard Sync)
+                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 
-            # E. Action Phase 2: Delivery to Google Sheets (Dashboard Sync)
-            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
-            # แยกราคาขาย/เช่า จาก Gemini analysis
-            price_sell = ai_evaluation.get("price_sell", "-")
-            price_rent = ai_evaluation.get("price_rent", "-")
-            
-            # คำนวณสถานะ S or R ของประกาศ
-            has_sell = price_sell != "-" and price_sell.strip() != ""
-            has_rent = price_rent != "-" and price_rent.strip() != ""
-            
-            if has_sell and has_rent:
-                computed_type = "ขายและเช่า"
-            elif has_sell:
-                computed_type = "ขาย"
-            elif has_rent:
-                computed_type = "เช่า"
-            else:
-                computed_type = ai_evaluation.get("type", "-")
+                # แยกราคาขาย/เช่า จาก Gemini analysis
+                price_sell = ai_evaluation.get("price_sell", "-")
+                price_rent = ai_evaluation.get("price_rent", "-")
+                
+                # คำนวณสถานะ S or R ของประกาศ
+                has_sell = price_sell != "-" and price_sell.strip() != ""
+                has_rent = price_rent != "-" and price_rent.strip() != ""
+                
+                if has_sell and has_rent:
+                    computed_type = "ขายและเช่า"
+                elif has_sell:
+                    computed_type = "ขาย"
+                elif has_rent:
+                    computed_type = "เช่า"
+                else:
+                    computed_type = ai_evaluation.get("type", "-")
 
-            # จัดลำดับข้อมูล 26 คอลัมน์ (เพิ่ม Column Y: โหลดรูป, Column Z: ประเภททรัพย์)
-            row_to_append = [
-                current_time,                                # 1. วันที่ลง/บันทึก (จากเว็บ/บอท) (A)
-                "-",                                         # 2. วันที่โทร (B)
-                "New",                                       # 3. สถานะการโทร (C)
-                "-",                                         # 4. ขอสแกน (D)
-                "-",                                         # 5. เข้าดูห้อง (E)
-                "-",                                         # 6. วันที่เข้าดู (F)
-                "-",                                         # 7. สแกน (G)
-                "-",                                         # 8. รู้ทิศ (สแกนแล้ว) (H)
-                "AI Scraper",                                # 9. ลงข้อมูล (I)
-                "-",                                         # 10. วันนัดสแกน (J)
-                ai_evaluation.get("project_name", "-"),      # 11. ชื่อโครงการ (จากเว็บ) (K)
-                ai_evaluation.get("house_number", "-"),      # 12. เลขที่ห้อง (จากเว็บ) (L)
-                ai_evaluation.get("floor", "-"),             # 13. ชั้น (จากเว็บ) (M)
-                ai_evaluation.get("bed_bath", "-"),          # 14. Unit Type (จากเว็บ) (N)
-                computed_type,                               # 15. S or R (จากเว็บ) (O)
-                price_sell,                                  # 16. ราคาขาย (จากเว็บ) (P)
-                price_rent,                                  # 17. ราคาเช่า (จากเว็บ) (Q)
-                ai_evaluation.get("size", "-"),              # 18. Area (จากเว็บ) (R)
-                ai_evaluation.get("phone_number", "-"),      # 19. เบอร์โทรเจ้าของ (จากเว็บ) (S)
-                ai_evaluation.get("customer_name", "-"),     # 20. ชื่อเจ้าของ (จากเว็บ) (T)
-                raw_data.get("url", "-"),                                    # 21. ลิงค์ (จากเว็บ) (U)
-                ai_evaluation.get("line_id", "-") if ai_evaluation.get("line_id", "-") != "-" else "-", # 22. Remark (V) (เก็บ Line ID แทน)
-                "-",                                         # 23. Feedback (W)
-                ", ".join(raw_data.get("images", [])),       # 24. ภาพห้อง (จากเว็บ) (X)
-                f'=HYPERLINK("{drive_link}", "คลิกโหลดรูป")' if drive_link and drive_link != "-" else "-", # 25. โหลดรูป (Y)
-                selected_type                                # 26. ประเภททรัพย์ (Z)
-            ]
-            
-            # Sanitize Row Data: บังคับทุกช่องเป็น String ป้องกัน Error จาก Google Sheets API (กรณี AI ส่งค่า {} หรือ [] มา)
-            clean_row_data = [str(val) if val is not None else "-" for val in row_to_append]
-            
-            print(f"Syncing ID {listing_id} to Google Sheets (26 Columns Mapping)...")
-            if sheets.append_data(clean_row_data):
-                new_records_added += 1
-                print(f"-> SUCCESS synced ID {listing_id} to Google Sheets.")
-            else:
-                print(f"-> FAILED to sync ID {listing_id} to Google Sheets.")
+                # จัดลำดับข้อมูล 26 คอลัมน์ (เพิ่ม Column Y: โหลดรูป, Column Z: ประเภททรัพย์)
+                row_to_append = [
+                    current_time,                                # 1. วันที่ลง/บันทึก (จากเว็บ/บอท) (A)
+                    "-",                                         # 2. วันที่โทร (B)
+                    "New",                                       # 3. สถานะการโทร (C)
+                    "-",                                         # 4. ขอสแกน (D)
+                    "-",                                         # 5. เข้าดูห้อง (E)
+                    "-",                                         # 6. วันที่เข้าดู (F)
+                    "-",                                         # 7. สแกน (G)
+                    "-",                                         # 8. รู้ทิศ (สแกนแล้ว) (H)
+                    "AI Scraper",                                # 9. ลงข้อมูล (I)
+                    "-",                                         # 10. วันนัดสแกน (J)
+                    ai_evaluation.get("project_name", "-"),      # 11. ชื่อโครงการ (จากเว็บ) (K)
+                    ai_evaluation.get("house_number", "-"),      # 12. เลขที่ห้อง (จากเว็บ) (L)
+                    ai_evaluation.get("floor", "-"),             # 13. ชั้น (จากเว็บ) (M)
+                    ai_evaluation.get("bed_bath", "-"),          # 14. Unit Type (จากเว็บ) (N)
+                    computed_type,                               # 15. S or R (จากเว็บ) (O)
+                    price_sell,                                  # 16. ราคาขาย (จากเว็บ) (P)
+                    price_rent,                                  # 17. ราคาเช่า (จากเว็บ) (Q)
+                    ai_evaluation.get("size", "-"),              # 18. Area (จากเว็บ) (R)
+                    ai_evaluation.get("phone_number", "-"),      # 19. เบอร์โทรเจ้าของ (จากเว็บ) (S)
+                    ai_evaluation.get("customer_name", "-"),     # 20. ชื่อเจ้าของ (จากเว็บ) (T)
+                    raw_data.get("url", "-"),                                    # 21. ลิงค์ (จากเว็บ) (U)
+                    ai_evaluation.get("line_id", "-") if ai_evaluation.get("line_id", "-") != "-" else "-", # 22. Remark (V) (เก็บ Line ID แทน)
+                    "-",                                         # 23. Feedback (W)
+                    ", ".join(raw_data.get("images", [])),       # 24. ภาพห้อง (จากเว็บ) (X)
+                    f'=HYPERLINK("{drive_link}", "คลิกโหลดรูป")' if drive_link and drive_link != "-" else "-", # 25. โหลดรูป (Y)
+                    selected_type                                # 26. ประเภททรัพย์ (Z)
+                ]
+                
+                # Sanitize Row Data: บังคับทุกช่องเป็น String ป้องกัน Error จาก Google Sheets API (กรณี AI ส่งค่า {} หรือ [] มา)
+                clean_row_data = [str(val) if val is not None else "-" for val in row_to_append]
+                
+                print(f"Syncing ID {listing_id} to Google Sheets (26 Columns Mapping)...")
+                if sheets.append_data(clean_row_data):
+                    new_records_added += 1
+                    print(f"-> SUCCESS synced ID {listing_id} to Google Sheets.")
+                else:
+                    print(f"-> FAILED to sync ID {listing_id} to Google Sheets.")
+            except Exception as e:
+                print(f"❌ ERROR processing ID {listing_id}: {e}")
+                continue
                 
         total_skipped_session += skipped_records
         total_saved_session += new_records_added

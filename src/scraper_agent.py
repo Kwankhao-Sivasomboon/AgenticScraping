@@ -6,6 +6,7 @@ from datetime import datetime
 from playwright.sync_api import sync_playwright
 from playwright_stealth import stealth_sync
 from config import MAX_ITEMS_PER_RUN, SKIP_KEYWORDS, MAX_PRICE_LIMITS
+from firestore_service import FirestoreService
 
 class ScraperAgent:
     def __init__(self):
@@ -16,6 +17,9 @@ class ScraperAgent:
         self.username = os.getenv('LIVING_INSIDER_USERNAME')
         self.password = os.getenv('LIVING_INSIDER_PASSWORD')
         self.state_file = "playwright_state.json"
+        
+        # เชื่อมต่อ Firestore เพื่อเช็กรายการซ้ำแบบ Early Deduplication ก่อนเสียเวลาเปิดหน้าเว็บ
+        self.firestore = FirestoreService()
 
     def random_sleep(self, min_seconds=2, max_seconds=5):
         time.sleep(random.uniform(min_seconds, max_seconds))
@@ -218,7 +222,7 @@ class ScraperAgent:
 
     def scrape_living_insider(self, target_url, property_type="คอนโด", zone="อ่อนนุช"):
         results = []
-        launch_args = {"headless": False, "args": ["--no-sandbox", "--disable-setuid-sandbox"]}
+        launch_args = {"headless": True, "args": ["--no-sandbox", "--disable-setuid-sandbox"]}
         if self.use_proxy and self.proxy_server:
             launch_args["proxy"] = {"server": self.proxy_server, "username": self.proxy_username, "password": self.proxy_password}
 
@@ -315,6 +319,12 @@ class ScraperAgent:
                 for url in list(set(valid_urls)):
                     if len(results) >= MAX_ITEMS_PER_RUN: 
                         break
+                        
+                    # Early Deduplication: ดึง ID จาก URL และตรวจใน Firestore ทันที! ป้องกันการถูกแบนและไม่ต้องเสียเวลาโหลดหน้าเดิม
+                    listing_id = url.split('/')[-1].replace('.html', '')
+                    if self.firestore.is_listing_exists(listing_id):
+                        print(f"⏭️ ข้ามการขูด (เคยบันทึกไว้แล้ว): {url}")
+                        continue
                     
                     print(f"Scraping: {url}")
                     dp = context.new_page()
@@ -506,8 +516,17 @@ class ScraperAgent:
                     except Exception as e:
                         print(f"❌ [Scrape Error] ข้าม {url}: {str(e).split('===========================')[0].strip()}")
                     finally: 
-                        dp.close()
-
+                        try:
+                            dp.close()
+                        except:
+                            pass
+                        # เก็กกวาดหน้าจอที่อาจเด้งขึ้นมาเองจากการกดปุ่ม (Popup/New Tab)
+                        for p in context.pages:
+                            if p != page:
+                                try:
+                                    p.close()
+                                except:
+                                    pass
                 # Pagination
                 next_btn = page.locator(f"ul.pagination li a:has-text('{current_page + 1}')").first
                 if next_btn.is_visible():
