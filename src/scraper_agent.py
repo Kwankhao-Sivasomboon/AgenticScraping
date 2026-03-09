@@ -267,8 +267,8 @@ class ScraperAgent:
                         let p = '0'; \
                         let parent = a.closest('.box-istock-item, .istock-item, .item-list, .istock-list, .istock_topic_border, .istock-lists'); \
                         if(parent) { \
-                            let priceEl = parent.querySelector('.listing_cost .text_price, .text_price, .price, .font-price, .istock-price, .price-detail'); \
-                            if(priceEl) p = priceEl.innerText || priceEl.textContent; \
+                            let priceEls = parent.querySelectorAll('.listing_cost .text_price, .text_price, .price, .font-price, .istock-price, .price-detail, .tv-price'); \
+                            if(priceEls.length > 0) p = Array.from(priceEls).map(e => e.innerText || e.textContent).join(' '); \
                         } \
                         return {url: a.href, price: p}; \
                     }).filter(item => !item.url.includes('javascript') && item.url.includes('http') && item.url.includes('livinginsider.com')); \
