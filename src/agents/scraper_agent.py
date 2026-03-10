@@ -235,59 +235,96 @@ class ScraperAgent:
 
     def search_zone(self, page, zone_keyword="บางนา"):
         print(f"🔍 [Search] เริ่มกระบวนการค้นหา: {zone_keyword}")
+        
         try:
-            # 1. กดให้ pop up ขึ้นมา พยายามย้ำๆ 3 รอบถ้ายังไม่ขึ้น
-            print("1️⃣ คลิกเปิด Popup...")
-            search_input = page.locator("#search_zone").first
+            # 1. พยายามเปิดระฆัง/ช่องค้นหาหลักก่อน (ถ้ามีโฆษณาบังให้ปิดก่อน)
+            self.close_banners(page)
             
+            # คลิกกล่องค้นหาหลักเพื่อเปิด Modal/Popup (ย้ำๆ จนกว่าจะขึ้น)
+            print("1️⃣ คลิกเปิดกล่องพิมพ์โซน...")
             popup_opened = False
             for attempt in range(3):
                 try:
-                    # ลองคลิกผ่าน Playwright แบบบังคับก่อน
-                    page.locator('#box-input-search').click(timeout=3000, force=True)
-                except:
-                    # ถ้าไม่ได้ค่อยใช้ JS
-                    page.evaluate("let box = document.getElementById('box-input-search'); if(box) box.click();")
+                    search_box_trigger = page.locator('#box-input-search, #search_zone_input').first
+                    search_box_trigger.click(force=True)
+                    self.random_sleep(1, 2)
                     
-                self.random_sleep(1.5, 2.5)
+                    # เช็คว่ากล่องลิสต์โผล่มาหรือยัง
+                    if page.locator("#div_zone_list").is_visible():
+                        popup_opened = True
+                        break
+                except:
+                    pass
+                print(f"   [Retry] พยายามเปิด Popup อีกครั้ง ({attempt+1}/3)...")
+            
+            # 2. รอให้กล่องรายการ #div_zone_list โหลดขึ้นมา
+            print("2️⃣ กำลังกวาดหารายการโซนทั้งหมดจากใน Popup (#div_zone_list)...")
+            page.wait_for_selector("#div_zone_list", state='visible', timeout=10000)
+            self.random_sleep(1, 2)
+            
+            # 3. ใช้ JS เข้าไปวิ่งไล่หาทีละบรรทัดใน #div_zone_list (พร้อมไถหน้าจอถ้าหาไม่เจอ)
+            # ลบช่องว่างออกเวลาเทียบเพื่อให้ match string แหว่งๆ หรือมี HTML แทรกได้
+            clean_zone = zone_keyword.replace(" ", "").replace("'", "\\'")
+            
+            clicked_text = None
+            for scroll_attempt in range(15): # เลื่อนหาลึกสุด 15 ครั้ง
+                js_script = f"""() => {{
+                    let lists = document.querySelectorAll('#div_zone_list .follow-list');
+                    for (let item of lists) {{
+                        let text = item.innerText || item.textContent || "";
+                        // ลบเว้นวรรคและแท็ก HTML (Playwright get innerText มาให้แล้ว)
+                        let cleanText = text.replace(/[\\s\\n\\r]+/g, '');
+                        
+                        if (cleanText.includes('{clean_zone}')) {{
+                            item.scrollIntoView({{behavior: 'smooth', block: 'center'}});
+                            item.click();
+                            return text.replace(/[\\n\\r]+/g, ' ').trim();
+                        }}
+                    }}
+                    
+                    // หากันจนตาแฉะแล้วไม่เจอ เลื่อนกล่อง #div_zone_list ลงเพื่อดึงข้อมูลใหม่
+                    let box = document.getElementById('div_zone_list');
+                    if(box) {{
+                        box.scrollTop += 500; // ไถลงทีละ 500px
+                    }}
+                    return null;
+                }}"""
                 
-                if search_input.is_visible():
-                    popup_opened = True
+                clicked_text = page.evaluate(js_script)
+                
+                if clicked_text:
+                    print(f"✨ ค้นพบโซนและคลิกสำเร็จ: '{clicked_text}'")
                     break
                 else:
-                    print(f"   [Retry {attempt+1}/3] กำลังพยายามคลิกกล่องค้นหาอีกครั้ง...")
-            
-            if not popup_opened:
-                raise Exception("Cannot open the search popup after 3 attempts.")
+                    self.random_sleep(1, 1.5) # รอข้อมูลหน้าไหมโหลดเสร็จหลังเลื่อนจอ
+                    
+            if not clicked_text:
+                print(f"⚠️ ไถหาจนสุดแล้วไม่พบโซนที่ตรงกับ '{zone_keyword}' จะลองใช้วิธีพิมพ์ช่องค้นหาแทน...")
+                # Fallback: ถ้าหาไม่เจอจริงๆ ค่อยคลิกพิมพ์ค้นหาเหมือนเดิม
+                search_input = page.locator("#search_zone").first
+                if search_input.is_visible():
+                    search_input.click()
+                    search_input.fill("")
+                    search_input.press_sequentially(zone_keyword, delay=150)
+                    self.random_sleep(3, 5)
+                    try:
+                        suggestion = page.locator(".search_zone_list_item, .zone_item_data, .search-item-zone").first
+                        suggestion.wait_for(state='visible', timeout=5000)
+                        suggestion.click(force=True)
+                    except:
+                        search_input.press("Enter")
 
-            # 2. คลิกที่ช่องพิมพ์ใน Popup อีกที (เพื่อความชัวร์ว่า focus อยู่ที่ช่อง)
-            print("2️⃣ รอช่องพิมพ์ #search_zone และโฟกัส")
-            search_input.wait_for(state='visible', timeout=10000) # เพิ่มเวลาเผื่อโหลดช้า
-            search_input.click(force=True)
-            search_input.fill("")
-            self.random_sleep(1, 2)
-
-            # 3. พิมพ์ด้วย delay 150ms ตามที่คุณต้องการ
-            print(f"3️⃣ เริ่มพิมพ์: {zone_keyword}")
-            search_input.press_sequentially(zone_keyword, delay=150)
-
-            # 4. หยุดรอให้เว็บดึง Autocomplete (สำคัญมาก)
-            self.random_sleep(5, 10) # เผื่อเว็บหาข้อมูล autocomplete นาน (ปรับเป็น 5-10 วิ ตามคำขอ)
-
-            # 5. แล้ว Enter
-            print("4️⃣ กด Enter!")
-            search_input.press('Enter')
-
-            # 6. รอให้ข้อมูลรีเฟรช
-            self.random_sleep(6, 8) 
+            # 4. รอผลลัพธ์โหลด
+            print("4️⃣ กำลังรีเฟรชหน้าผลลัพธ์...")
+            self.random_sleep(6, 9) 
             
             return True
             
         except Exception as e:
             print(f"❌ [Search Error]: เกิดข้อผิดพลาดตอนค้นหา: {e}")
             try:
-                page.screenshot(path="error_search_timeout.png", full_page=True)
-                print("📸 บันทึกภาพหน้าจอตอนพังไว้ที่ 'error_search_timeout.png' แล้ว ลองเปิดดูครับ")
+                page.screenshot(path="error_search_robust.png", full_page=True)
+                print("📸 บันทึกภาพหน้าจอไว้ที่ 'error_search_robust.png' เพื่อเช็คว่าพังตอนไหน")
             except:
                 pass
             return False
