@@ -2,11 +2,13 @@ import os
 import sys
 from datetime import datetime
 
-# Add src to path if needed (though we'll run from root)
-sys.path.append(os.path.join(os.getcwd(), 'src'))
+# Ensure project root is in the python path
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.append(project_root)
 
-from sheets_service import SheetsService
-from firestore_service import FirestoreService
+from src.services.sheets_service import SheetsService
+from src.services.firestore_service import FirestoreService
 
 def sync_data():
     """

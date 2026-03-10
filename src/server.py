@@ -5,10 +5,12 @@ from pydantic import BaseModel
 from typing import Optional
 import logging
 
-# Ensure src is in the python path
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+# Ensure project root is in the python path
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.append(project_root)
 
-from main import run_scraping_job
+from src.main import run_scraping_job
 
 app = FastAPI(title="Scraper Agent API")
 

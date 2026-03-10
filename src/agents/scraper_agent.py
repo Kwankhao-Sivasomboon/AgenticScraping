@@ -3,9 +3,10 @@ import time
 import random
 import re
 from datetime import datetime
+from urllib.parse import quote
 from playwright.sync_api import sync_playwright
 from playwright_stealth import stealth_sync
-from config import MAX_ITEMS_PER_RUN, SKIP_KEYWORDS, MAX_PRICE_LIMITS, SHOW_BROWSER
+from src.config import MAX_ITEMS_PER_RUN, SKIP_KEYWORDS, MAX_PRICE_LIMITS, SHOW_BROWSER
 
 class ScraperAgent:
     def __init__(self):
@@ -17,23 +18,45 @@ class ScraperAgent:
         self.password = os.getenv('LIVING_INSIDER_PASSWORD')
         self.state_file = "playwright_state.json"
         
-        from firestore_service import FirestoreService
+        from src.services.firestore_service import FirestoreService
         self.firestore = FirestoreService()
 
     def random_sleep(self, min_seconds=2, max_seconds=5):
         time.sleep(random.uniform(min_seconds, max_seconds))
 
     def close_banners(self, page):
-        """จัดการ Popup และ Ad ด้วย JS เพื่อความรวดเร็วและไม่ขวางทางบอท"""
+        """เคลียร์สิ่งกีดขวาง (Popup/Collection/Ads) ด้วยวิธี Hardcore เพื่อให้บอทคลิกเมนูหลักได้"""
         try:
-            page.evaluate("""
-                var closeBtns = document.querySelectorAll('.btn-close, .close, #popup-close, [onclick*="closeBanner"]');
-                closeBtns.forEach(btn => { try { btn.click(); } catch(e) {} });
-                // var backdrops = document.querySelectorAll('.modal-backdrop');
-                // backdrops.forEach(el => { el.style.setProperty('display', 'none', 'important'); });
-                // document.body.classList.remove('modal-open');
-                // document.body.style.overflow = 'auto';
-            """)
+            page.evaluate("""() => {
+                // 1. กดปุ่มปิดที่เห็นชัดเจน (เลี่ยงพวกปุ่ม Collection/Keep)
+                const closeSelectors = [
+                    '.btn-close', '.close', '#popup-close', '[onclick*="closeBanner"]', 
+                    '.modal-header .close', '.modal-footer .btn-secondary', '[aria-label="Close"]'
+                ];
+                closeSelectors.forEach(s => {
+                    document.querySelectorAll(s).forEach(btn => {
+                        try { btn.click(); } catch(e) {}
+                    });
+                });
+
+                // 2. สั่ง 'ลบ/ซ่อน' องค์ประกอบ modal ที่บังหน้าจอ (รวมถึง Collection modal ที่พี่เจอ)
+                const blockSelectors = [
+                    '.modal', '.modal-backdrop', '.fade.show', '.sp-container', 
+                    '[class*="modal-content"]', '[id*="modal"]', '.fancybox-overlay',
+                    '.listing-keep-modal', '#collection-modal'
+                ];
+                blockSelectors.forEach(s => {
+                    document.querySelectorAll(s).forEach(el => {
+                        try { el.style.setProperty('display', 'none', 'important'); } catch(e) {}
+                        try { el.style.setProperty('visibility', 'hidden', 'important'); } catch(e) {}
+                    });
+                });
+
+                // 3. ปลดล็อก Body (เผื่อเว็บค้างท่า Scroll-lock)
+                document.body.classList.remove('modal-open');
+                document.body.style.overflow = 'auto';
+                document.body.style.pointerEvents = 'auto';
+            }""")
         except: pass
 
     def login(self, page, context):
@@ -100,65 +123,115 @@ class ScraperAgent:
 
     def select_owner(self, page):
         print("🔍 Selecting 'Owner' filter...")
-        try:
-            dropdown_btn = page.locator('#btn_dropdown_ownertype')
-            dropdown_btn.wait_for(state='visible', timeout=10000)
-            dropdown_btn.click(force=True)
-            self.random_sleep(1.5, 2.5) 
-            
-            owner_option = page.locator('li.dropdown-ownertype-data[data-key="1"] a').first
-            owner_option.wait_for(state='visible', timeout=5000)
-            owner_option.hover()
-            self.random_sleep(0.5, 1)
-            owner_option.click(force=True)
-            
-            print("✅ Clicked 'Owner' successfully.")
-            self.random_sleep(2, 3)
-        except Exception as e:
-            print(f"⚠️ Native click for Owner failed: {e}. Trying JavaScript Fallback...")
+        for attempt in range(3):
             try:
-                page.evaluate("""
-                    var ownerBtn = document.querySelector('li.dropdown-ownertype-data[data-key="1"] a');
-                    if (ownerBtn) { ownerBtn.click(); }
-                """)
-                self.random_sleep(2, 3)
-            except Exception as js_e:
-                print(f"❌ Selection failed completely: {js_e}")
+                # 0. เช็คก่อนว่าเลือกไว้หรือยัง
+                check_text = page.locator('#dropdown-ownertype').inner_text().strip()
+                if "เจ้าของ" in check_text or check_text == "Owner":
+                    print(f"✅ 'Owner' is already selected (Current: {check_text}).")
+                    return
+
+                # 1. กดเปิด Dropdown
+                dropdown_btn = page.locator('#btn_dropdown_ownertype').first
+                dropdown_btn.wait_for(state='visible', timeout=10000)
+                dropdown_btn.scroll_into_view_if_needed()
+                dropdown_btn.click(force=True)
+                
+                # 2. รอแอนิเมชั่นกางออก
+                page.wait_for_timeout(1000) 
+                
+                # 3. จิ้มเลือก
+                owner_option = page.locator('li.dropdown-ownertype-data[data-key="1"] a').first
+                owner_option.wait_for(state='visible', timeout=5000)
+                owner_option.click(force=True)
+                
+                # 4. รอเช็คผลลัพธ์ (เพิ่มเวลาเป็น 3 วิ เพื่อชัวร์)
+                page.wait_for_timeout(2500)
+                final_text = page.locator('#dropdown-ownertype').inner_text().strip()
+                print(f"DEBUG: Button text after selection: '{final_text}'")
+                
+                if "เจ้าของ" in final_text or final_text == "Owner":
+                    print(f"✅ Confirmed: 'Owner' selected (Attempt {attempt + 1}).")
+                    return
+                else:
+                    # ถ้ายังไม่เปลี่ยนอีกลองใช้ JS ช่วยรันคำสั่งเดิมซ้ำ
+                    print("⚠️ Text didn't update. Trying JS force click...")
+                    page.evaluate("""
+                        var el = document.querySelector('li.dropdown-ownertype-data[data-key="1"] a');
+                        if (el) el.click();
+                    """)
+                    page.wait_for_timeout(2000)
+                    final_text_js = page.locator('#dropdown-ownertype').inner_text().strip()
+                    if "เจ้าของ" in final_text_js:
+                        print(f"✅ Confirmed via JS Fallback: 'Owner' selected.")
+                        return
+                    raise Exception(f"Selection didn't update (Got: '{final_text_js}')")
+
+            except Exception as e:
+                print(f"⚠️ Attempt {attempt + 1} for Owner failed: {e}")
+                self.random_sleep(1, 2)
+        print("❌ Failed to select Owner after 3 attempts.")
 
     def select_property_type(self, page, p_type="คอนโด"):
         if not p_type or p_type == "ทั้งหมด":
             return
             
         print(f"🔍 Selecting Property Type: {p_type}...")
-        try:
-            dropdown_btn = page.locator('#btn_dropdown_actiontype')
-            dropdown_btn.wait_for(state='visible', timeout=10000)
-            dropdown_btn.click(force=True)
-            self.random_sleep(1.5, 2.5) 
-            
-            type_option = page.locator(f"li.dropdown-actiontype-data a:has-text('{p_type}')").first
-            type_option.wait_for(state='visible', timeout=5000)
-            type_option.hover()
-            self.random_sleep(0.5, 1)
-            type_option.click(force=True)
-            
-            print(f"✅ Selected '{p_type}' successfully.")
-            self.random_sleep(2, 3)
-        except Exception as e:
-            print(f"⚠️ Native click for {p_type} failed. Trying JavaScript Fallback...")
+        
+        for attempt in range(3):
             try:
-                page.evaluate(f"""
-                    var items = document.querySelectorAll('li.dropdown-actiontype-data a');
-                    for (var i = 0; i < items.length; i++) {{
-                        if (items[i].innerText.includes('{p_type}')) {{
-                            items[i].click();
-                            break;
+                # 0. เช็คก่อนว่าถูกเลือกอยู่แล้วไหม
+                check_text = page.locator('#dropdown-actiontype').inner_text().strip()
+                if p_type in check_text:
+                    print(f"✅ '{p_type}' already selected.")
+                    return
+
+                # 1. กดเปิด Dropdown
+                dropdown_btn = page.locator('#btn_dropdown_actiontype, #btn_dropdown_propertytype').first
+                dropdown_btn.wait_for(state='visible', timeout=10000)
+                dropdown_btn.scroll_into_view_if_needed()
+                dropdown_btn.click(force=True)
+                
+                # 2. รอแอนิเมชั่นกางออก
+                page.wait_for_timeout(1000) 
+                
+                # 3. จิ้มเลือกแบบระบุเจาะจง
+                type_option = page.locator(f"li.dropdown-actiontype-data a:has-text('{p_type}'), li.dropdown-propertytype-data a:has-text('{p_type}')").first
+                type_option.wait_for(state='visible', timeout=5000)
+                type_option.click(force=True)
+                
+                # 4. เช็คผลลัพธ์
+                page.wait_for_timeout(2500)
+                final_text = page.locator('#dropdown-actiontype').inner_text().strip()
+                print(f"DEBUG: PropType button text after selection: '{final_text}'")
+                
+                if p_type in final_text:
+                    print(f"✅ Confirmed: '{p_type}' selected (Attempt {attempt + 1}).")
+                    return
+                else:
+                    # ลองใช้ JS Fallback อีกแรง
+                    print("⚠️ PropType text didn't update. Trying JS click...")
+                    page.evaluate(f"""
+                        var items = document.querySelectorAll('li.dropdown-actiontype-data a, li.dropdown-propertytype-data a');
+                        for (var i = 0; i < items.length; i++) {{
+                            if (items[i].innerText.trim().includes('{p_type}')) {{
+                                items[i].click();
+                                break;
+                            }}
                         }}
-                    }}
-                """)
-                self.random_sleep(2, 3)
-            except Exception as js_e:
-                print(f"❌ Selection failed completely: {js_e}")
+                    """)
+                    page.wait_for_timeout(2000)
+                    final_text_js = page.locator('#dropdown-actiontype').inner_text().strip()
+                    if p_type in final_text_js:
+                        print(f"✅ Confirmed via JS Fallback: '{p_type}' selected.")
+                        return
+                    raise Exception(f"Selection did not stick (Got: '{final_text_js}')")
+                    
+            except Exception as e:
+                print(f"⚠️ Attempt {attempt + 1} for {p_type} failed: {e}")
+                self.random_sleep(1, 2)
+        
+        print(f"❌ Failed to select {p_type} after 3 attempts.")
 
     def search_zone(self, page, zone_keyword="บางนา"):
         print(f"🔍 [Search] เริ่มกระบวนการค้นหา: {zone_keyword}")
@@ -199,7 +272,7 @@ class ScraperAgent:
             search_input.press_sequentially(zone_keyword, delay=150)
 
             # 4. หยุดรอให้เว็บดึง Autocomplete (สำคัญมาก)
-            self.random_sleep(3, 5) # เผื่อเว็บหาข้อมูล autocomplete นาน
+            self.random_sleep(5, 10) # เผื่อเว็บหาข้อมูล autocomplete นาน (ปรับเป็น 5-10 วิ ตามคำขอ)
 
             # 5. แล้ว Enter
             print("4️⃣ กด Enter!")
@@ -261,18 +334,27 @@ class ScraperAgent:
                     break
 
                 # 🌟 แก้ไขจุดที่ 2: ดึงข้อมูลโดยกวาดลิงก์ที่กว้างขึ้น (รองรับทั้ง /detail และ istockdetail)
-                items = page.evaluate("(skipKeywords) => { \
-                    const links = Array.from(document.querySelectorAll(\"a.istock_detail_url, a[href*='/detail'], a[href*='istockdetail'], a[href*='livingdetail']\")); \
-                    return links.map(a => { \
-                        let p = '0'; \
-                        let parent = a.closest('.box-istock-item, .istock-item, .item-list, .istock-list, .istock_topic_border, .istock-lists'); \
-                        if(parent) { \
-                            let priceEls = parent.querySelectorAll('.listing_cost .text_price, .text_price, .price, .font-price, .istock-price, .price-detail, .tv-price'); \
-                            if(priceEls.length > 0) p = Array.from(priceEls).map(e => e.innerText || e.textContent).join(' '); \
-                        } \
-                        return {url: a.href, price: p}; \
-                    }).filter(item => !item.url.includes('javascript') && item.url.includes('http') && item.url.includes('livinginsider.com')); \
-                }", SKIP_KEYWORDS)
+                items = page.evaluate("""(skipKeywords) => { 
+                    const links = Array.from(document.querySelectorAll("a.istock_detail_url, a[href*='/detail'], a[href*='istockdetail'], a[href*='livingdetail']")); 
+                    return links.map(a => { 
+                        let p = '0';
+                        let parent = a.closest('.box-istock-item, .istock-item, .item-list, .istock-list, .istock_topic_border, .istock-lists, .item, [class*="item"]');
+                        if(parent) {
+                            let priceParts = [];
+                            // กวาดทุกกล่องราคาในประกาศนั้น
+                            let costBoxes = parent.querySelectorAll('.listing_cost, .box-price, .price-box');
+                            costBoxes.forEach(box => {
+                                let label = box.innerText.includes('เช่า') ? '[RENT]' : '[SALE]';
+                                let priceText = box.innerText.replace(/[\\n\\s]/g, '');
+                                priceParts.push(label + priceText);
+                            });
+                            // ถ้าหาแบบแยกกล่องไม่เจอ ให้กวาดเนื้อหาทั้งหมด
+                            if(priceParts.length === 0) p = parent.innerText.replace(/[\\n\\s]/g, ' '); 
+                            else p = priceParts.join(' | ');
+                        }
+                        return {url: a.href, price: p};
+                    }).filter(item => !item.url.includes('javascript') && item.url.includes('http') && item.url.includes('livinginsider.com'));
+                }""", SKIP_KEYWORDS)
 
                 valid_urls = []
                 seen_urls = set()
@@ -280,37 +362,31 @@ class ScraperAgent:
                 
                 for item in items:
                     url = item['url']
-                    
-                    # กันลิงก์ซ้ำ (1 ประกาศอาจจะมีหลายลิงก์ ทำให้ล็อกและเช็คราคาซ้ำหลายรอบ)
-                    if url in seen_urls:
-                        continue
+                    if url in seen_urls: continue
                     seen_urls.add(url)
                     
-                    raw_price = str(item['price']).replace(',', '').strip()
-                    
+                    raw_price_data = str(item['price'])
                     try:
-                        p_vals = []
-                        import re
-                        # ดึงกลุ่มตัวเลขทั้งหมด เช่น "12.5 ล้าน", "75000"
-                        matches = re.findall(r'(\d+(?:\.\d+)?)\s*(ล้าน)?', raw_price)
+                        is_over_budget = False
                         
-                        for val, is_million in matches:
+                        # สกัดตัวเลขทั้งหมดในกล่องประกาศ
+                        price_numbers = re.findall(r'(\d+(?:\.\d+)?)\s*(ล้าน)?', raw_price_data.replace(',', ''))
+                        
+                        for val, is_million in price_numbers:
                             num = float(val)
-                            if is_million == 'ล้าน':
-                                num *= 1000000
-                            p_vals.append(num)
-                        
-                        # ถ้าราคาขายในกล่องข้อความเกิน limit ให้ตัดทิ้ง
-                        # คนมักจะใส่ราคาขายกับเช่ามาคู่กัน ราคาขายจะสูงกว่าเสมอ เราจะเช็คราคาสูงสุด
-                        max_price = max(p_vals) if p_vals else 0
-                        
-                        if max_price > limit:
-                            print(f"🚫 ตัดทิ้ง: {raw_price} (ราคา {max_price:,.0f} เกินงบ {limit:,.0f})")
-                            continue 
+                            if is_million == 'ล้าน': num *= 1000000
+                            
+                            # ถ้ามีราคาใดราคาหนึ่งในประกาศ (เช่น ราคาขาย) ที่สูงเกินงบ ให้ตัดทิ้งทันที
+                            if num > limit:
+                                print(f"🚫 [Initial Guard] ตัดทิ้ง: พบราคา {num:,.0f} เกินงบ {limit:,.0f} (ข้อมูลดิบ: {raw_price_data.strip()})")
+                                is_over_budget = True
+                                break
+                                
+                        if is_over_budget: continue
                             
                         valid_urls.append(url)
                     except Exception as e:
-                        print(f"⚠️ [Parse Error] อ่านราคาไม่สำเร็จ: '{raw_price}' -> ให้เว็บวิ่งต่อก่อน ({e})")
+                        print(f"⚠️ [Parse Error] อ่านราคาหน้าแรกล้มเหลว -> วิ่งต่อก่อน ({e})")
                         valid_urls.append(url)
 
                 # ทำการ Unique URL เพื่อกันการขูดข้อมูลซ้ำ
@@ -393,7 +469,14 @@ class ScraperAgent:
                                     # ดูดเบอร์จาก Modal ยืนยัน
                                     phone_modal_val = dp.locator("#phone_number_modal_show, #href_phone_modal").first
                                     if phone_modal_val.is_visible(timeout=3000):
-                                        hidden_contacts.append(f"เบอร์โทรศัพท์ (สกัดจากไอคอนด่วน): {phone_modal_val.inner_text().strip()}")
+                                        phone_text = phone_modal_val.inner_text().strip()
+                                        
+                                        # 🛡️ [Fix] ถ้าเบอร์มี 9 หลักและขึ้นต้นด้วย 6, 8, 9 ให้เติม 0 ข้างหน้า
+                                        if len(phone_text) == 9 and phone_text[0] in ['6', '8', '9']:
+                                            phone_text = "0" + phone_text
+                                            print(f"💡 Fixed phone number format: {phone_text}")
+                                            
+                                        hidden_contacts.append(f"เบอร์โทรศัพท์ (สกัดจากไอคอนด่วน): {phone_text}")
                                         
                                     # ปิด Modal พับเก็บ (ถ้ามีปุ่มปิด หรือกด Esc)
                                     dp.keyboard.press('Escape')
@@ -487,7 +570,7 @@ class ScraperAgent:
                                     if (['avatar', 'icon', 'banner', 'logo'].some(v => lowerSrc.includes(v))) return false;
                                     return src.includes('livinginsider.com') && (src.includes('og_detail') || src.includes('upload/topic'));
                                 });
-                                return [...new Set(validUrls)].slice(0, 50); // ดึงรูปภาพสูงสุด 50 รูป
+                                return [...new Set(validUrls)].slice(0, 100); // ดึงรูปภาพสูงสุด 100 รูป
                             }''')
                             # ปิด Gallery ทิ้งหลังกวาดรูปเสร็จ
                             dp.keyboard.press('Escape')

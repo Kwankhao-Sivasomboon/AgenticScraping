@@ -1,32 +1,62 @@
+import os
+import sys
+import re
 from datetime import datetime
-from sheets_service import SheetsService
-from scraper_agent import ScraperAgent
-from evaluator_agent import EvaluatorAgent
-from firestore_service import FirestoreService
-from storage_service import StorageService
+
+# Ensure project root is in the python path to support 'src.' imports
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+from src.agents.scraper_agent import ScraperAgent
+from src.agents.evaluator_agent import EvaluatorAgent
+from src.services.firestore_service import FirestoreService
+from src.services.storage_service import StorageService
+from src.services.sheets_service import SheetsService
+from src.services.api_service import APIService
+from src.services.geocoding_service import GeocodingService
+from src.utils.image_processor import ImageService
 
 def init_services():
     try:
-        sheets = SheetsService()
+        from src.config import DEBUG_MODE
         scraper = ScraperAgent()
         evaluator = EvaluatorAgent()
         firestore = FirestoreService()
         storage_svc = StorageService()
+        api = APIService()
+        geocoding = GeocodingService()
+        image_svc = ImageService()
+        
+        sheets = None
+        if DEBUG_MODE:
+            try:
+                sheets = SheetsService()
+            except Exception as se:
+                print(f"⚠️ SheetsService initialization failed: {se}")
+        
+        # Only authenticate if we are NOT in debug mode (Production)
+        if not DEBUG_MODE:
+            api.authenticate()
+        else:
+            print("🧪 [Debug] Skipping Agent API Authentication...")
     except Exception as e:
         print(f"Error initializing services: {e}")
         return None
 
     return {
-        "sheets": sheets,
         "scraper": scraper,
         "evaluator": evaluator,
         "firestore": firestore,
-        "storage_svc": storage_svc
+        "storage_svc": storage_svc,
+        "api": api,
+        "geocoding": geocoding,
+        "image_svc": image_svc,
+        "sheets": sheets
     }
 
 def run_scraping_job(selected_type, selected_zone, max_items_override=None):
-    from config import MAX_RETRIES
-    import config
+    from src.config import MAX_RETRIES
+    import src.config as config
     
     if max_items_override is not None:
         config.MAX_ITEMS_PER_RUN = max_items_override
@@ -35,11 +65,17 @@ def run_scraping_job(selected_type, selected_zone, max_items_override=None):
     if not services:
         return {"error": "Failed to initialize services"}
         
-    sheets = services["sheets"]
     scraper = services["scraper"]
     evaluator = services["evaluator"]
     firestore = services["firestore"]
     storage_svc = services["storage_svc"]
+    api = services["api"]
+    geocoding = services["geocoding"]
+    image_svc = services["image_svc"]
+    sheets = services["sheets"]
+    
+    from src.config import DEBUG_MODE
+    print(f"🔧 Mode: {'DEBUG (Google Sheets)' if DEBUG_MODE else 'PRODUCTION (Agent API)'}")
 
     # 2. Ingestion Phase: Scraper Agent 
     print(f"\n--- Ingestion Phase: '{selected_type}' in '{selected_zone}' ---")
@@ -82,83 +118,126 @@ def run_scraping_job(selected_type, selected_zone, max_items_override=None):
             # B. Intelligence Phase (Gemini Analysis)
             ai_evaluation = evaluator.evaluate_listing(raw_data)
             
-            # Create ZIP (WebP encoded) and upload to Firebase Storage
-            image_urls = raw_data.get("images", [])
-            drive_link = "-"
-            if image_urls:
-                drive_link = storage_svc.create_zip_and_upload(image_urls, listing_id)
-                if drive_link and drive_link != "-":
-                    print(f"📦 อัปโหลด ZIP รูปลง Cloud Storage เรียบร้อย! ลิงก์: {drive_link}")
-                    
-            # ยัดลิงก์เข้า raw_data ด้วยเพื่อให้ถูกเก็บบน Firestore
-            raw_data['image_zip_url'] = drive_link
+            # --- [Google Maps API Geocoding as fallback] ---
+            lat = ai_evaluation.get("latitude")
+            lon = ai_evaluation.get("longitude")
+            if (not lat or str(lat) == "-") and (not lon or str(lon) == "-"):
+                address_query = f"{ai_evaluation.get('project_name', '')} {ai_evaluation.get('address', '')} {ai_evaluation.get('city', '')} {selected_zone}".strip()
+                g_lat, g_lon = geocoding.get_coordinates(address_query)
+                if g_lat and g_lon:
+                    ai_evaluation["latitude"] = g_lat
+                    ai_evaluation["longitude"] = g_lon
             
-            # C. Action Phase 1: Storage in Firestore (Main Storage)
-            print(f"Saving ID {listing_id} to Firestore...")
+            price_sell = ai_evaluation.get("price_sell", "-")
+            price_rent = ai_evaluation.get("price_rent", "-")
+            
+            # --- [Final Guard] คัดกรองราคาสูงสุดอีกครั้งหลัง AI วิเคราะห์เสร็จ ---
+            from src.config import MAX_PRICE_LIMITS
+            limit = MAX_PRICE_LIMITS.get(selected_type, 999999999)
+            
+            def parse_final_price(p_str):
+                if not p_str or p_str == "-": return 0
+                clean = str(p_str).replace(",", "").replace("/", "").strip()
+                matches = re.findall(r'(\d+(?:\.\d+)?)', clean)
+                if not matches: return 0
+                
+                # กวาดทุกตัวเลขที่เจอแล้วหาค่า MAX (กันกรณี Sale & Rent แล้วตัวเลขราคาเช่าโผล่มาตัวแรก)
+                p_vals = []
+                for m in matches:
+                    val = float(m)
+                    if "ล้าน" in str(p_str): val *= 1000000
+                    p_vals.append(val)
+                return max(p_vals) if p_vals else 0
+
+            final_sell_price = parse_final_price(price_sell)
+            final_rent_price = parse_final_price(price_rent)
+            
+            # เช็คราคาสูงสุดจากทั้งสองช่อง (เผื่อ Gemini ใส่สลับกันมา)
+            highest_actual_price = max(final_sell_price, final_rent_price)
+
+            if highest_actual_price > limit:
+                print(f"🚫 [Final Skip] {listing_id} พบราคาสูงสุด {highest_actual_price:,.0f} เกินงบ {limit:,.0f}. (ข้ามการบันทึก)")
+                skipped_records += 1
+                continue
+            # -----------------------------------------------------------------
+
+            # --- PREPARE DATA PAYLOAD ---
+            date_val = ai_evaluation.get("listing_date", "")
+            if date_val == "-" or not date_val:
+                date_val = datetime.now().strftime("%Y-%m-%d")
+
+            payload = {
+                "built": date_val,
+                "name": ai_evaluation.get("project_name") if ai_evaluation.get("project_name") != "-" else f"Listing {listing_id}",
+                "type": "condo" if "คอนโด" in selected_type else "house",
+                "status": "available",
+                "price": final_sell_price if final_sell_price > 0 else 0,
+                "monthly_rental_price": final_rent_price if final_rent_price > 0 else 0,
+                "description": raw_data.get("raw_text", "-")[:4000], 
+                "address": ai_evaluation.get("address", "-"),
+                "number": ai_evaluation.get("house_number", "-"),
+                "city": ai_evaluation.get("city", "-"),
+                "postal_code": ai_evaluation.get("postal_code", "-"),
+                "latitude": str(ai_evaluation.get("latitude", "")),
+                "longitude": str(ai_evaluation.get("longitude", "")),
+                "specifications": ai_evaluation.get("specifications", {}),
+                "specification_values": ai_evaluation.get("specification_values", {})
+            }
+
+            # --- DATA STORAGE SELECTION (DEBUG vs PRODUCTION) ---
+            if DEBUG_MODE:
+                # 1. Option A: Save to Google Sheets (Debug)
+                print(f"📊 [Debug] Saving to Google Sheet for {listing_id}...")
+                if sheets:
+                    # Prepare row data (Ordering based on your previous sheet structure)
+                    sheet_row = [
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        listing_id,
+                        raw_data.get("url", "-"),
+                        ai_evaluation.get("project_name", "-"),
+                        ai_evaluation.get("price_sell", "-"),
+                        ai_evaluation.get("price_rent", "-"),
+                        ai_evaluation.get("customer_name", "-"),
+                        ai_evaluation.get("phone_number", "-"),
+                        ai_evaluation.get("line_id", "-"),
+                        ai_evaluation.get("type", "-"),
+                        ai_evaluation.get("size", "-"),
+                        ai_evaluation.get("bed_bath", "-"),
+                        ai_evaluation.get("address", "-"),
+                        selected_zone,
+                        "DEBUG_MODE"
+                    ]
+                    sheets.append_data(sheet_row)
+                    print(f"✅ Data appended to Google Sheets.")
+                else:
+                    print("❌ Sheets service not available. Check credentials.")
+            else:
+                # 2. Option B: Save to Agent API (Production)
+                print(f"🏠 [Production] Creating property in API for {listing_id}...")
+                property_id = api.create_property(payload)
+                if not property_id:
+                    print(f"⚠️ [Note] API Offline/Failed - Skip property creation.")
+                else:
+                    ai_evaluation['api_property_id'] = property_id
+                
+                # --- IMAGE PROCESSING & UPLOAD (Only for API Mode) ---
+                image_urls = raw_data.get("images", [])
+                if image_urls and property_id:
+                    processed_photos = image_svc.process_images(image_urls)
+                    if processed_photos:
+                        api.upload_photos(property_id, processed_photos)
+                        print(f"✅ Images successfully attached to Property ID: {property_id}")
+            
+            # --- ALWAYS SAVE TO FIRESTORE (As History) ---
+            print(f"💾 Saving ID {listing_id} to Firestore tracking...")
             if firestore.save_listing(listing_id, raw_data, ai_evaluation):
+                print(f"-> Saved ID {listing_id} to Firestore.")
                 print(f"-> Saved ID {listing_id} to Firestore.")
             else:
                 print(f"-> FAILED saving ID {listing_id} to Firestore.")
                 
-            # E. Action Phase 2: Delivery to Google Sheets (Dashboard Sync)
-            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
-            # แยกราคาขาย/เช่า จาก Gemini analysis
-            price_sell = ai_evaluation.get("price_sell", "-")
-            price_rent = ai_evaluation.get("price_rent", "-")
-            
-            # คำนวณสถานะ S or R ของประกาศ
-            has_sell = price_sell != "-" and price_sell.strip() != ""
-            has_rent = price_rent != "-" and price_rent.strip() != ""
-            
-            if has_sell and has_rent:
-                computed_type = "ขายและเช่า"
-            elif has_sell:
-                computed_type = "ขาย"
-            elif has_rent:
-                computed_type = "เช่า"
-            else:
-                computed_type = ai_evaluation.get("type", "-")
-
-            # จัดลำดับข้อมูล 26 คอลัมน์ (เพิ่ม Column Y: โหลดรูป, Column Z: ประเภททรัพย์)
-            row_to_append = [
-                current_time,                                # 1. วันที่ลง/บันทึก (จากเว็บ/บอท) (A)
-                "-",                                         # 2. วันที่โทร (B)
-                "New",                                       # 3. สถานะการโทร (C)
-                "-",                                         # 4. ขอสแกน (D)
-                "-",                                         # 5. เข้าดูห้อง (E)
-                "-",                                         # 6. วันที่เข้าดู (F)
-                "-",                                         # 7. สแกน (G)
-                "-",                                         # 8. รู้ทิศ (สแกนแล้ว) (H)
-                "AI Scraper",                                # 9. ลงข้อมูล (I)
-                "-",                                         # 10. วันนัดสแกน (J)
-                ai_evaluation.get("project_name", "-"),      # 11. ชื่อโครงการ (จากเว็บ) (K)
-                ai_evaluation.get("house_number", "-"),      # 12. เลขที่ห้อง (จากเว็บ) (L)
-                ai_evaluation.get("floor", "-"),             # 13. ชั้น (จากเว็บ) (M)
-                ai_evaluation.get("bed_bath", "-"),          # 14. Unit Type (จากเว็บ) (N)
-                computed_type,                               # 15. S or R (จากเว็บ) (O)
-                price_sell,                                  # 16. ราคาขาย (จากเว็บ) (P)
-                price_rent,                                  # 17. ราคาเช่า (จากเว็บ) (Q)
-                ai_evaluation.get("size", "-"),              # 18. Area (จากเว็บ) (R)
-                ai_evaluation.get("phone_number", "-"),      # 19. เบอร์โทรเจ้าของ (จากเว็บ) (S)
-                ai_evaluation.get("customer_name", "-"),     # 20. ชื่อเจ้าของ (จากเว็บ) (T)
-                raw_data.get("url", "-"),                                    # 21. ลิงค์ (จากเว็บ) (U)
-                ai_evaluation.get("line_id", "-") if ai_evaluation.get("line_id", "-") != "-" else "-", # 22. Remark (V) (เก็บ Line ID แทน)
-                "-",                                         # 23. Feedback (W)
-                ", ".join(raw_data.get("images", [])),       # 24. ภาพห้อง (จากเว็บ) (X)
-                f'=HYPERLINK("{drive_link}", "คลิกโหลดรูป")' if drive_link and drive_link != "-" else "-", # 25. โหลดรูป (Y)
-                selected_type                                # 26. ประเภททรัพย์ (Z)
-            ]
-            
-            # Sanitize Row Data: บังคับทุกช่องเป็น String ป้องกัน Error จาก Google Sheets API (กรณี AI ส่งค่า {} หรือ [] มา)
-            clean_row_data = [str(val) if val is not None else "-" for val in row_to_append]
-            
-            print(f"Syncing ID {listing_id} to Google Sheets (26 Columns Mapping)...")
-            if sheets.append_data(clean_row_data):
-                new_records_added += 1
-                print(f"-> SUCCESS synced ID {listing_id} to Google Sheets.")
-            else:
-                print(f"-> FAILED to sync ID {listing_id} to Google Sheets.")
+            new_records_added += 1
+            print(f"-> WORKFLOW COMPLETED FOR {listing_id}.")
                 
         total_skipped_session += skipped_records
         total_saved_session += new_records_added
@@ -197,7 +276,7 @@ def run_scraping_job(selected_type, selected_zone, max_items_override=None):
 
 def main():
     print("=== Starting Agentic AI Scraping Workflow (Detailed Hybrid) ===")
-    from config import PROPERTY_TYPES, TARGET_ZONES
+    from src.config import PROPERTY_TYPES, TARGET_ZONES
     import random
     selected_type = random.choice(PROPERTY_TYPES)
     selected_zone = random.choice(TARGET_ZONES)

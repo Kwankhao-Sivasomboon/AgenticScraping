@@ -9,6 +9,9 @@ MAX_RETRIES = 3
 # ตั้งค่าการแสดงผลเบราว์เซอร์ (True = เปิดหน้าจอ, False = รันเบื้องหลัง)
 SHOW_BROWSER = True
 
+# Debug mode: True = Save to Google Sheets, False = Save to Agent API
+DEBUG_MODE = True
+
 # จำนวนรายการทรัพย์สินสูงสุดที่จะดึงต่อการรอบการค้นหา
 MAX_ITEMS_PER_RUN = 9999
 
