@@ -33,11 +33,18 @@ class APIService:
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=15)
             response.raise_for_status()
-            data = response.json()
-            # Assuming the token is in the response (e.g., data['token'] or data['access_token'])
-            self.token = data.get('token') or data.get('access_token')
-            print("✅ Agent Authentication Successful.")
-            return True
+            res_json = response.json()
+            
+            # --- ดึง Token จาก data -> token ตามตัวอย่าง Log ---
+            data_part = res_json.get('data', {})
+            self.token = data_part.get('token')
+            
+            if self.token:
+                print("✅ Agent Authentication Successful.")
+                return True
+            else:
+                print("❌ Authentication Failed: Token not found in response data.")
+                return False
         except Exception as e:
             print(f"❌ Authentication Failed: {e}")
             if hasattr(e, 'response') and e.response is not None:
@@ -50,7 +57,7 @@ class APIService:
             "Accept": "application/json"
         }
 
-    def create_property(self, payload):
+    def create_property(self, payload, retry_on_401=True):
         """
         Create a property via the API.
         """
@@ -61,6 +68,13 @@ class APIService:
         
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=20)
+            
+            # --- ปรับปรุงใหม่: แก้ไขปัญหา Token หมดอายุ (401) ---
+            if response.status_code == 401 and retry_on_401:
+                print("⚠️ Token หมดอายุ (401)! กำลังพยายาม Login ใหม่เพื่อขอ Token...")
+                self.token = None # เคลียร์ Token เก่า
+                if self.authenticate():
+                    return self.create_property(payload, retry_on_401=False) # ลองใหม่ครั้งเดียว
             
             # Check for conflict/duplicate
             if response.status_code == 409:
@@ -100,7 +114,9 @@ class APIService:
         
         for i, (filename, file_io) in enumerate(memory_files):
             # field name in multipart must be: photos[i][file]
-            files[f"photos[{i}][file]"] = (filename, file_io, "image/jpeg")
+            files[f"photos[{i}][file]"] = (filename, file_io)
+            # เพิ่ม tag เข้าไปด้วยเพื่อแก้ Validation Error
+            data[f"photos[{i}][tag]"] = "room" 
             
         try:
             response = requests.post(url, headers=headers, data=data, files=files, timeout=60)

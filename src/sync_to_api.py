@@ -11,7 +11,7 @@ if project_root not in sys.path:
 from src.services.firestore_service import FirestoreService
 from src.services.api_service import APIService
 from src.utils.image_processor import ImageService
-from src.config import DATA_MAPPING
+from src.config import DATA_MAPPING, MAX_ITEMS_PER_RUN
 
 def run_sync():
     print("🚀 เริ่มต้นกระบวนการ Sync ข้อมูลจาก Firestore ไปยัง Agent API...")
@@ -28,13 +28,13 @@ def run_sync():
         
     # 2. ดึงข้อมูลที่ยังไม่ได้ Sync
     print("📦 กำลังค้นหาข้อมูลใน Firestore ที่ยังไม่ได้ส่งเข้า API...")
-    unsynced_listings = firestore.get_unsynced_listings(limit=1) # ทดสอบเพียง 1 รายการตามคำขอ
+    unsynced_listings = firestore.get_unsynced_listings(limit=MAX_ITEMS_PER_RUN)
     
     if not unsynced_listings:
         print("✅ ไม่พบรายการที่รอการ Sync (ทุกรายการส่งขึ้น API หมดแล้ว)")
         return
         
-    print(f"🔥 พบ {len(unsynced_listings)} รายการที่รอการ Sync (จะทดสอบ 1 รายการ)...")
+    print(f"🔥 พบ {len(unsynced_listings)} รายการที่รอการ Sync (จำกัดครั้งละ {MAX_ITEMS_PER_RUN} รายการ)...")
     
     success_count = 0
     fail_count = 0
@@ -82,31 +82,34 @@ def run_sync():
             # --- CONSTRUCT PAYLOAD ---
             payload = {
                 "owner_is_agent": True,
-                "living_level": "normal",
-                "customer_name": clean(ai_evaluation.get("customer_name"), "Owner (LivingInsider)"),
-                "contact_number": clean(ai_evaluation.get("phone_number")),
-                "line_id": clean(ai_evaluation.get("line_id")),
+                "living_level": clean(ai_evaluation.get("living_level"), "normal"),
+                "customer_name": clean(ai_evaluation.get("customer_name"), "-"),
+                "contact_number": clean(ai_evaluation.get("phone_number"), "0"),
+                "line_id": clean(ai_evaluation.get("line_id"), ""),
                 "area": float(ai_evaluation.get("size", 0)) if str(ai_evaluation.get("size", "0")).replace('.','',1).isdigit() else 0,
-                "direction": DATA_MAPPING.get("directions").get(ai_evaluation.get("direction", "ไม่ระบุทิศ"), 8),
-                "furnishing": DATA_MAPPING.get("furnishings").get(ai_evaluation.get("furnishing", "ไม่ระบุ"), 4),
+                # "direction": direction_str,  # เอาออกชั่วคราวเพราะ Validation ไม่ผ่าน
+                # "furnishing": DATA_MAPPING.get("furnishings").get(ai_evaluation.get("furnishing", "ไม่ระบุ"), 4),
                 "location": int(location_val), 
                 "built": datetime.now().strftime("%Y-%m-%d"),
-                "name": clean(ai_evaluation.get("project_name"), f"Listing {listing_id}"),
+                "name": clean(ai_evaluation.get("project_name"), "-"),
                 "type": "condo" if "คอนโด" in selected_type else "house",
-                "status": "pending", 
+                "status": "available", 
+                "garage": int(specs.get("parking_spaces", 0)) if str(specs.get("parking_spaces", "0")).isdigit() else 0,
                 "price": final_sell_price if final_sell_price > 0 else 0,
                 "monthly_rental_price": final_rent_price if final_rent_price > 0 else 0,
-                "description": clean(raw_data.get("raw_text"), "")[:4000], 
-                "address": clean(ai_evaluation.get("address"), ""),
-                "number": clean(ai_evaluation.get("house_number"), ""),
-                "city": clean(ai_evaluation.get("city"), ""),
-                "postal_code": clean(ai_evaluation.get("postal_code"), ""),
-                "latitude": str(clean(ai_evaluation.get("latitude"), "")),
-                "longitude": str(clean(ai_evaluation.get("longitude"), "")),
-                "bedroom": bedrooms,
-                "bathroom": bathrooms,
+                "description": clean(raw_data.get("raw_text"), "")[:2000],
+                "address": clean(ai_evaluation.get("address"), "-"),
+                "number": clean(ai_evaluation.get("house_number"), "-"), 
+                "city": clean(ai_evaluation.get("city"), "-"),
+                "state": clean(ai_evaluation.get("state"), "-"),
+                "country": "Thailand",
+                "postal_code": clean(ai_evaluation.get("postal_code"), "-"),
+                "latitude": str(clean(ai_evaluation.get("latitude"), "0")),
+                "longitude": str(clean(ai_evaluation.get("longitude"), "0")),
+                "bedrooms": bedrooms,
+                "bathrooms": bathrooms,
                 "specifications": specs,
-                "specification_values": ai_evaluation.get("specification_values", {})
+                "specification_values": ai_evaluation.get("specification_values", [])
             }
 
             # 4. ส่งข้อมูลเข้า Agent API สร้าง Property

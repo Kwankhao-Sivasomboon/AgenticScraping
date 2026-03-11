@@ -41,27 +41,35 @@ class ImageService:
                 print(f"⬇️ Downloading image {i+1} into RAM...")
                 response = requests.get(url, timeout=10)
                 if response.status_code == 200:
+                    # ดึงชื่อไฟล์และนามสกุลเดิมจาก URL
+                    original_name = url.split('/')[-1].split('?')[0]
+                    if not original_name: original_name = f"photo_{i+1}.jpg"
+                    ext = original_name.split('.')[-1].lower()
+                    if ext not in ['jpg', 'jpeg', 'png', 'webp']: ext = 'jpg'
+                    
                     img_buffer = io.BytesIO(response.content)
                     
-                    # 1. เช็คด้วยโมเดลราคาถูกก่อน
+                    # 1. เช็คด้วยโมเดลราคาถูกก่อน (เพื่อประหยัดทรัพยากร)
                     has_watermark = self.check_watermark_cheap(img_buffer)
+                    
                     if has_watermark:
                         print(f"⚠️ Watermark detected on image {i+1}. Removing...")
-                        # 2. ลบลายน้ำด้วย model ราคาแพง (บน RAM)
+                        # 2. ลบลายน้ำด้วย model ราคาแพง
                         img_buffer = self.remove_watermark_expensive(img_buffer)
-                    else:
-                        print(f"✅ Image {i+1} is clean.")
                         
-                    # Standardize format to JPEG
-                    img = Image.open(img_buffer)
-                    if img.mode not in ("RGB"):
-                        img = img.convert("RGB")
-                    
-                    final_buffer = io.BytesIO()
-                    img.save(final_buffer, format="JPEG", quality=90)
-                    final_buffer.seek(0)
-                    
-                    processed_files.append((f"photo_{i+1}.jpg", final_buffer))
+                        # หลัง Clean แล้ว ค่อยแปลงเป็น JPEG เพื่อความเสถียร
+                        img = Image.open(img_buffer)
+                        if img.mode not in ("RGB"):
+                            img = img.convert("RGB")
+                        
+                        final_buffer = io.BytesIO()
+                        img.save(final_buffer, format="JPEG", quality=90)
+                        final_buffer.seek(0)
+                        processed_files.append((f"cleaned_{original_name}", final_buffer))
+                    else:
+                        print(f"✅ Image {i+1} is clean. Using original file.")
+                        img_buffer.seek(0)
+                        processed_files.append((original_name, img_buffer))
             except Exception as e:
                 print(f"❌ Failed to process image {url}: {e}")
                 
