@@ -58,7 +58,11 @@ def export_missing_to_sheet():
             # เงื่อนไข: 
             # 1. ต้องไม่ใช่โซนอุดมสุข 
             # 2. ต้องยังไม่มีใน Sheet
+            # 3. ข้ามรายการที่มีแค่ link (legacy_import)
             if zone == "อุดมสุข":
+                continue
+            
+            if data.get('status') == 'legacy_import':
                 continue
             
             if url in existing_urls:

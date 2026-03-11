@@ -48,6 +48,11 @@ def run_sync():
         print(f"\n======================================")
         print(f"🔄 กำลังประมวลผล Listing ID: {listing_id}")
         
+        # ✅ Guard: ถ้าไม่มีข้อมูล AI Analysis (มีแค่ URL ใน Firestore) ให้ข้ามไปครับ
+        if not ai_evaluation:
+            print(f"⚠️ Skipping {listing_id}: ไม่มีข้อมูล AI Analysis (อาจมีแค่ URL ใน Firestore)")
+            continue
+        
         try:
             # ---------------------------------------------------------
             # DATA PREPARATION (แปลงข้อมูลจาก AI สู่ Payload ของ API)
