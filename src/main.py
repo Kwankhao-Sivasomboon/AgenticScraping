@@ -254,12 +254,19 @@ def run_scraping_job(selected_type, selected_zone, max_items_override=None):
     }
 
 def main():
+    start_time = datetime.now()
     print("=== Starting Agentic AI Scraping Workflow (Detailed Hybrid) ===")
     from src.config import PROPERTY_TYPES, TARGET_ZONES
     import random
     selected_type = random.choice(PROPERTY_TYPES)
     selected_zone = random.choice(TARGET_ZONES)
     run_scraping_job(selected_type, selected_zone)
+    
+    end_time = datetime.now()
+    elapsed_time = end_time - start_time
+    # แปลงเป็น นาที:วินาที ให้อ่านง่าย
+    minutes, seconds = divmod(elapsed_time.total_seconds(), 60)
+    print(f"\n⏱️ เวลาที่ใช้ในการทำงานทั้งหมด: {int(minutes)} นาที {seconds:.2f} วินาที")
 
 if __name__ == "__main__":
     main()
