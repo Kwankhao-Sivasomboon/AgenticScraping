@@ -79,6 +79,60 @@ def run_sync():
             bedrooms = int(specs.get("bedrooms", 13)) if specs.get("bedrooms") else 13 # 13 คือ "ไม่ระบุ" ใน mapping ตระกูลห้อง
             bathrooms = int(specs.get("bathrooms", 13)) if specs.get("bathrooms") else 13
 
+            # --- AI IMAGE ANALYSIS FOR STYLE & FILTERING ---
+            image_urls = raw_data.get("images", [])
+            valid_image_urls = image_urls
+            house_color = "-"
+            interior_style = "-"
+            
+            if image_urls:
+                from src.room_analyzer.style_classifier import analyze_room_images
+                print(f"🤖 [AI] กำลังประเมินและคัดกรองรูปภาพ {len(image_urls)} รูป (Color, Style, Invalid images)...")
+                analysis_result = analyze_room_images(image_urls)
+                
+                if analysis_result:
+                    house_color = analysis_result.color_name
+                    interior_style = analysis_result.interior_style.value
+                    
+                    # คัดเอาเฉพาะ URL รูปที่ AI บอกว่า valid (ผ่านการกรอง Google map, plans, etc.)
+                    valid_image_urls = [image_urls[i] for i in analysis_result.valid_image_indices if i < len(image_urls)]
+                    print(f"  [AI] พบรูปที่ใช้งานได้ {len(valid_image_urls)} รูป จากทั้งหมด {len(image_urls)}")
+                    print(f"  [AI] สไตล์: {interior_style} | สี: {house_color} | ประเภท: {analysis_result.property_type.value}")
+                    
+                    # ปรับประเภททรัพย์ถ้า AI ระบุมาว่า condo หรือ house
+                    if analysis_result.property_type.value in ["condo", "house"]:
+                        selected_type = analysis_result.property_type.value
+                        
+            # --- GOOGLE MAPS LOOKUP ---
+            project_name = clean(ai_evaluation.get("project_name"), "-")
+            
+            # ดึงค่าตั้งต้นจาก AI ก่อน
+            address_data = {
+                "address": clean(ai_evaluation.get("address"), "-"),
+                "city": clean(ai_evaluation.get("city"), "-"),
+                "state": clean(ai_evaluation.get("state"), "-"),
+                "postal_code": clean(ai_evaluation.get("postal_code"), "-"),
+                "country": "Thailand",
+                "latitude": str(clean(ai_evaluation.get("latitude"), "0")),
+                "longitude": str(clean(ai_evaluation.get("longitude"), "0"))
+            }
+            
+            # เรียกดึงจาก Maps API มาทับ
+            if project_name != "-":
+                from src.services.maps_service import get_location_details
+                map_lookup = get_location_details(project_name)
+                
+                # ถ้า API ได้ข้อมูลมา ให้เติมในฟิลด์ที่ขาด หรือทับค่า Default ที่ไร้ประโยชน์
+                if map_lookup:
+                    for key in ["address", "city", "state", "postal_code", "country", "latitude", "longitude"]:
+                        # เติมค่าถ้าเราหาไม่ได้ หรือถ้า AI ให้ค่า Default มา
+                        if address_data[key] in ["-", "0", "", "Bangkok", "Thailand"] and map_lookup.get(key):
+                            address_data[key] = map_lookup[key]
+
+            # เพิ่ม style ลงใน specifications
+            if interior_style != "-":
+                specs["style"] = interior_style
+
             # --- CONSTRUCT PAYLOAD ---
             payload = {
                 "owner_is_agent": True,
@@ -92,20 +146,21 @@ def run_sync():
                 "location": int(location_val), 
                 "built": datetime.now().strftime("%Y-%m-%d"),
                 "name": clean(ai_evaluation.get("project_name"), "-"),
-                "type": "condo" if "คอนโด" in selected_type else "house",
+                "type": "condo" if "คอนโด" in selected_type or selected_type == "condo" else "house",
                 "status": "available", 
                 "garage": int(specs.get("parking_spaces", 0)) if str(specs.get("parking_spaces", "0")).isdigit() else 0,
                 "price": final_sell_price if final_sell_price > 0 else 0,
                 "monthly_rental_price": final_rent_price if final_rent_price > 0 else 0,
                 "description": clean(raw_data.get("raw_text"), "")[:2000],
-                "address": clean(ai_evaluation.get("address"), "-"),
+                "address": address_data["address"],
                 "number": clean(ai_evaluation.get("house_number"), "-"), 
-                "city": clean(ai_evaluation.get("city"), "-"),
-                "state": clean(ai_evaluation.get("state"), "-"),
-                "country": "Thailand",
-                "postal_code": clean(ai_evaluation.get("postal_code"), "-"),
-                "latitude": str(clean(ai_evaluation.get("latitude"), "0")),
-                "longitude": str(clean(ai_evaluation.get("longitude"), "0")),
+                "city": address_data["city"],
+                "state": address_data["state"],
+                "country": address_data["country"],
+                "postal_code": address_data["postal_code"],
+                "latitude": address_data["latitude"],
+                "longitude": address_data["longitude"],
+                "house_color": house_color,
                 "bedrooms": bedrooms,
                 "bathrooms": bathrooms,
                 "specifications": specs,
@@ -124,10 +179,9 @@ def run_sync():
             print(f"✅ สร้าง Property สำเร็จ! (API Property ID: {property_id})")
             
             # 5. ซิงค์รูปภาพและลบลายน้ำ (Image Processing & Uploading)
-            image_urls = raw_data.get("images", [])
-            if image_urls:
-                print(f"🖼️ [Images] กำลังโหลดและลบลายน้ำ {len(image_urls)} ภาพ...")
-                processed_photos = image_svc.process_images(image_urls)
+            if valid_image_urls:
+                print(f"🖼️ [Images] กำลังโหลดและลบลายน้ำ {len(valid_image_urls)} ภาพ...")
+                processed_photos = image_svc.process_images(valid_image_urls)
                 if processed_photos:
                     print(f"📤 กำลังอัปโหลดภาพเข้า Agent API...")
                     api.upload_photos(property_id, processed_photos)
