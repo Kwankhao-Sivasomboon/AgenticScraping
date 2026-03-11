@@ -55,10 +55,10 @@ def run_sync():
             selected_type = ai_evaluation.get("type", "คอนโด")
             location_val = "109" if "คอนโด" in selected_type else "131" # Default to Bangkok Phattanakarn (from config)
             
-            # Helper: แปลง None (null), "-" หรือค่าว่าง ให้เป็นค่าที่ API ต้องการ
             def clean(val, default=""):
-                if val is None or val == "-": return default
-                return val
+                if val is None or val == "-" or str(val).strip() == "": return default
+                # ตัด quote ที่อาจหลุดมาจาก JSON parsing
+                return str(val).strip().strip('"')
 
             # เช็คและแปลงราคา
             def parse_final_price(val):
@@ -92,16 +92,16 @@ def run_sync():
                 
                 if analysis_result:
                     house_color = analysis_result.color_name
-                    interior_style = analysis_result.interior_style.value
+                    interior_style = analysis_result.interior_style  # str แล้ว ไม่ต้อง .value
                     
                     # คัดเอาเฉพาะ URL รูปที่ AI บอกว่า valid (ผ่านการกรอง Google map, plans, etc.)
                     valid_image_urls = [image_urls[i] for i in analysis_result.valid_image_indices if i < len(image_urls)]
                     print(f"  [AI] พบรูปที่ใช้งานได้ {len(valid_image_urls)} รูป จากทั้งหมด {len(image_urls)}")
-                    print(f"  [AI] สไตล์: {interior_style} | สี: {house_color} | ประเภท: {analysis_result.property_type.value}")
+                    print(f"  [AI] สไตล์: {interior_style} | สี: {house_color} | ประเภท: {analysis_result.property_type}")
                     
                     # ปรับประเภททรัพย์ถ้า AI ระบุมาว่า condo หรือ house
-                    if analysis_result.property_type.value in ["condo", "house"]:
-                        selected_type = analysis_result.property_type.value
+                    if analysis_result.property_type in ["condo", "house"]:
+                        selected_type = analysis_result.property_type
                         
             # --- GOOGLE MAPS LOOKUP ---
             project_name = clean(ai_evaluation.get("project_name"), "-")
@@ -151,7 +151,7 @@ def run_sync():
                 "garage": int(specs.get("parking_spaces", 0)) if str(specs.get("parking_spaces", "0")).isdigit() else 0,
                 "price": final_sell_price if final_sell_price > 0 else 0,
                 "monthly_rental_price": final_rent_price if final_rent_price > 0 else 0,
-                "description": clean(raw_data.get("raw_text"), "")[:2000],
+                "description": "-",
                 "address": address_data["address"],
                 "number": clean(ai_evaluation.get("house_number"), "-"), 
                 "city": address_data["city"],
@@ -164,7 +164,9 @@ def run_sync():
                 "bedrooms": bedrooms,
                 "bathrooms": bathrooms,
                 "specifications": specs,
-                "specification_values": ai_evaluation.get("specification_values", [])
+                "specification_values": ai_evaluation.get("specification_values", []),
+                "property_initial_owner": clean(ai_evaluation.get("customer_name"), None),
+                "property_initial_owner_mobile_number": clean(ai_evaluation.get("phone_number"), None),
             }
 
             # 4. ส่งข้อมูลเข้า Agent API สร้าง Property

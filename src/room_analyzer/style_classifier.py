@@ -7,32 +7,22 @@ from PIL import Image
 import imagehash
 from google import genai
 from google.genai import types
-from pydantic import BaseModel, Field
-from enum import Enum
+from pydantic import BaseModel, Field, ConfigDict
 from dotenv import load_dotenv
 
 load_dotenv()
 
-class InteriorStyle(str, Enum):
-    MODERN = "Modern"
-    NORDIC = "Nordic"
-    CONTEMPORARY = "Contemporary"
-    MINIMALIST = "Minimalist"
-    LOFT = "Loft"
-    LUXURY = "Luxury"
-    OTHER = "Other"
-
-class PropertyType(str, Enum):
-    CONDO = "condo"
-    HOUSE = "house"
-    UNKNOWN = "unknown"
-
 class PropertyImagesAnalysis(BaseModel):
-    average_color_hex: str = Field(description="HEX code of the overall dominant room color")
-    color_name: str = Field(description="Color name of the overall dominant room color (e.g. White, Beige, Gray)")
-    interior_style: InteriorStyle = Field(description="Interior style of the rooms")
-    property_type: PropertyType = Field(description="Is the property a condo or a house? Determine from structural cues (e.g. detached building = house, high rise = condo).")
-    valid_image_indices: List[int] = Field(description="Indices (starting from 0) of the images that are relevant AND NOT maps, floor plans, people, or unrelated objects. Must be integers matching the input array order.")
+    model_config = ConfigDict(
+        populate_by_name=True,
+        extra='ignore' # ถ้า AI ตอบเกินมาให้ข้ามไป ไม่ต้อง Error
+    )
+    average_color_hex: str = Field(description="HEX code of the overall dominant room color, e.g. #FFFFFF")
+    color_name: str = Field(description="Color name of the overall dominant room color, e.g. White, Beige, Gray")
+    interior_style: str = Field(description="Interior style: one of Modern, Nordic, Contemporary, Minimalist, Loft, Luxury, Other")
+    property_type: str = Field(description="Property type: one of 'condo', 'house', 'unknown' based on structural cues")
+    valid_image_indices: List[int] = Field(description="List of integer indices (0-based) of images that show interior rooms. Exclude: maps, floor plans, people, animals, blurry images.")
+
 
 def download_image(url: str) -> Optional[Image.Image]:
     headers = {
@@ -74,10 +64,13 @@ def filter_similar_images(image_data_list: List[Dict[str, Any]], threshold: int 
     return unique_data
 
 def analyze_room_images(image_urls: List[str]) -> Optional[PropertyImagesAnalysis]:
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = os.getenv("GEMINI_API_KEY_COLOR") or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if not api_key:
-        print("[!] Warning: GEMINI_API_KEY is not set.")
+        print("[!] Warning: No Gemini API Key found (GEMINI_API_KEY_COLOR / GEMINI_API_KEY / GOOGLE_API_KEY). Skipping image analysis.")
         return None
+    key_source = "GEMINI_API_KEY_COLOR" if os.getenv("GEMINI_API_KEY_COLOR") else ("GEMINI_API_KEY" if os.getenv("GEMINI_API_KEY") else "GOOGLE_API_KEY")
+    print(f"  [AI] Using key from: {key_source}")
+
         
     client = genai.Client(api_key=api_key)
     
@@ -121,7 +114,7 @@ def analyze_room_images(image_urls: List[str]) -> Optional[PropertyImagesAnalysi
     for attempt in range(3):
         try:
             response = client.models.generate_content(
-                model='gemini-2.5-flash',
+                model='gemini-2.5-flash', # โมเดลเดิม
                 contents=contents,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
@@ -130,12 +123,19 @@ def analyze_room_images(image_urls: List[str]) -> Optional[PropertyImagesAnalysi
                 )
             )
             analysis_data = response.text
-            return PropertyImagesAnalysis.model_validate_json(analysis_data)
+            try:
+                result = PropertyImagesAnalysis.model_validate_json(analysis_data)
+                print(f"  [AI] Result Validated! Style: {result.interior_style}, Color: {result.color_name}, Images: {len(result.valid_image_indices)}")
+                return result
+            except Exception as ve:
+                print(f"  [AI] JSON Validation Error: {ve}")
+                print(f"  [AI] Raw Output: {analysis_data}")
+                return None
         except Exception as e:
             if "503" in str(e) and attempt < 2:
                 time.sleep((attempt + 1) * 3)
                 continue
-            print(f"  [!] AI API Error: {e}")
+            print(f"  [AI] API Connection Error: {e}")
             return None
             
     return None

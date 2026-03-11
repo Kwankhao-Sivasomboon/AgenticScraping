@@ -25,8 +25,31 @@ def sync_sheet_zones_to_firestore():
         client = gspread.authorize(creds)
         spreadsheet = client.open_by_url(sheet_url)
         worksheet = spreadsheet.worksheet('LivingInsider')
-        rows = worksheet.get_all_records()
+        
+        rows = worksheet.get_all_values()
+        if not rows:
+            print("[!] No data in sheet.")
+            return
+            
+        header = rows[0]
         print(f"      Total rows found in sheet: {len(rows)}")
+
+        # หา Index ของคอลัมน์ที่ต้องการ
+        url_idx = -1
+        zone_idx = -1
+        
+        for idx, col in enumerate(header):
+            col_name = col.strip().lower()
+            if col_name in ['ลิงค์', 'url', 'link']:
+                url_idx = idx
+            if col_name in ['zone', 'โซน']:
+                zone_idx = idx
+        
+        # Fallback ถ้าหาตามชื่อไม่เจอ ให้ใช้ index ตายตัว (U=20, AA=26)
+        if url_idx == -1: url_idx = 20
+        if zone_idx == -1: zone_idx = 26
+        
+        print(f"      Targeting Columns -> Link: Index {url_idx} ('{header[url_idx]}'), Zone: Index {zone_idx} ('{header[zone_idx]}')")
 
         # 2. เชื่อมต่อ Firestore
         print("[2/3] Connecting to Firestore...")
@@ -35,48 +58,69 @@ def sync_sheet_zones_to_firestore():
         collection_ref = db.collection('Leads')
 
         # 3. วนลูปเช็คข้อมูลและอัปเดต
-        print("[3/3] Syncing Zone & Price values to Firestore...")
+        print("[3/3] Syncing values to Firestore...")
         updated_count = 0
         skipped_count = 0
+        no_id_count = 0
+        no_zone_count = 0
         
-        # Regex สำหรับดึง Listing ID จาก URL (เผื่อใน Sheet ไม่มี ID)
-        id_pattern = re.compile(r'post-(\d+)')
+        # Regex ที่ครอบคลุมทุกลิงก์ของ LivingInsider
+        id_patterns = [
+            re.compile(r'post-(\d+)'),
+            re.compile(r'livingdetail/(\d+)'),
+            re.compile(r'istockdetail/([^/.]+)\.html'), # สำหรับรูปแบบ gDgDjg_...
+            re.compile(r'livingdetail/([^/.]+)\.html'), 
+            re.compile(r'/([^/.]+)\.html$')               # วิธีสุดท้าย: เอาส่วนท้ายก่อน .html
+        ]
 
-        for record in rows:
-            # ดึงข้อมูลสำคัญจากชื่อหัวตารางใน Sheet
-            url = str(record.get('ลิงค์', record.get('URL', ''))).strip()
-            # สมมติ Column Zone คือ AA หรือถ้าไม่มีหัวตาราง ให้ใช้ชื่อที่เราตั้งไว้
-            zone_val = str(record.get('Zone', '')).strip()
+        for i in range(1, len(rows)):
+            row = rows[i]
+            if len(row) <= url_idx: continue
             
-            if not url or url == "-":
+            url = row[url_idx].strip()
+            zone_val = row[zone_idx].strip() if len(row) > zone_idx else ""
+            
+            if not url or url == "-" or url == "":
                 continue
                 
             # พยายามหา Listing ID
-            listing_id = str(record.get('Listing ID', ''))
-            if not listing_id or listing_id == "-":
-                match = id_pattern.search(url)
+            listing_id = None
+            for pattern in id_patterns:
+                match = pattern.search(url)
                 if match:
                     listing_id = match.group(1)
+                    break
             
             if not listing_id:
+                if i < 5: # ปริ้นตัวอย่างที่พลาดแค่ 5 อันแรกเพื่อไม่ให้รก
+                    print(f"      [Debug] Could not extract ID from URL at row {i+1}: {url}")
+                no_id_count += 1
                 continue
 
-            # ถ้ามีค่า Zone ให้เอาไปอัปเดตใน Firestore
-            if zone_val and zone_val != "-":
-                doc_ref = collection_ref.document(str(listing_id))
-                # เช็คก่อนว่ามี Document นี้ไหม
-                if doc_ref.get().exists:
-                    doc_ref.set({"zone": zone_val}, merge=True)
-                    updated_count += 1
-                else:
-                    skipped_count += 1
+            if not zone_val or zone_val == "-":
+                no_zone_count += 1
+                continue
 
-        print(f"\n[Done] Update complete!")
-        print(f" - Updated in Firestore: {updated_count} documents")
-        print(f" - Documents not found in Firestore: {skipped_count} (Maybe deleted or different ID)")
+            # อัปเดตใน Firestore
+            doc_ref = collection_ref.document(str(listing_id))
+            # เช็คก่อนว่ามี Document นี้ไหม (เพื่อความชัวร์และไม่สร้างขยะ)
+            doc_snap = doc_ref.get(['api_synced']) # ดึงแค่ฟิลด์เดียวเพื่อประหยัด
+            
+            if doc_snap.exists:
+                doc_ref.update({"zone": zone_val})
+                updated_count += 1
+            else:
+                # ถ้าไม่เจอด้วย ID ตรงๆ ลองเช็คเผื่อ ID มีเคสตัวเล็กตัวใหญ่ผสม
+                skipped_count += 1
+
+        print(f"\n✨ Sync Summary:")
+        print(f" ✅ Updated in Firestore: {updated_count} documents")
+        print(f" ❌ ID not found in Firestore: {skipped_count}")
+        print(f" ⚠️ Rows skipped (No ID in URL): {no_id_count}")
+        print(f" ⏳ Rows skipped (No Zone value): {no_zone_count}")
         
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"❌ Error: {e}")
 
 if __name__ == "__main__":
     sync_sheet_zones_to_firestore()
