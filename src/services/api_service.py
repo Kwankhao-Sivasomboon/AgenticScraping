@@ -20,7 +20,7 @@ class APIService:
             return True # Token already provided via .env
             
         print("🔐 Authenticating Agent API...")
-        url = f"{self.base_url}/agent/tokens/create"
+        url = f"{self.base_url}/api/agent/login"
         payload = {
             "email": self.email,
             "password": self.password
@@ -55,7 +55,7 @@ class APIService:
         Create a property via the API.
         """
         print("🏠 Creating Property via API...")
-        url = f"{self.base_url}/agent/properties"
+        url = f"{self.base_url}/api/agent/properties"
         headers = self._get_auth_headers()
         headers["Content-Type"] = "application/json"
         
@@ -88,7 +88,7 @@ class APIService:
             return False
             
         print(f"📸 Uploading {len(memory_files)} photos to Property ID: {property_id}...")
-        url = f"{self.base_url}/agent/upload/photos"
+        url = f"{self.base_url}/api/agent/upload/photos"
         headers = self._get_auth_headers()
         
         # requests formatting for multipart form data

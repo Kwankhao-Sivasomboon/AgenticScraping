@@ -25,10 +25,10 @@ class ScraperAgent:
         time.sleep(random.uniform(min_seconds, max_seconds))
 
     def close_banners(self, page):
-        """เคลียร์สิ่งกีดขวาง (Popup/Collection/Ads) ด้วยวิธี Hardcore เพื่อให้บอทคลิกเมนูหลักได้"""
+        """เคลียร์สิ่งกีดขวาง (Popup/Ads) ให้บอทคลิกเมนูหลักได้ โดยไม่ไปซ่อนกล่องค้นหา"""
         try:
             page.evaluate("""() => {
-                // 1. กดปุ่มปิดที่เห็นชัดเจน (เลี่ยงพวกปุ่ม Collection/Keep)
+                // 1. กดปุ่มปิดโฆษณาที่ชัดเจน
                 const closeSelectors = [
                     '.btn-close', '.close', '#popup-close', '[onclick*="closeBanner"]', 
                     '.modal-header .close', '.modal-footer .btn-secondary', '[aria-label="Close"]'
@@ -39,16 +39,14 @@ class ScraperAgent:
                     });
                 });
 
-                // 2. สั่ง 'ลบ/ซ่อน' องค์ประกอบ modal ที่บังหน้าจอ (รวมถึง Collection modal ที่พี่เจอ)
-                const blockSelectors = [
-                    '.modal', '.modal-backdrop', '.fade.show', '.sp-container', 
-                    '[class*="modal-content"]', '[id*="modal"]', '.fancybox-overlay',
-                    '.listing-keep-modal', '#collection-modal'
+                // 2. ซ่อนเฉพาะโฆษณา/ตัวคัดกรองที่บังจอจริงๆ (ไม่ซ่อน .modal ทั้งหมด เพราะกล่องค้นหาอาจเป็น modal)
+                const adSelectors = [
+                    '.sp-container', '.listing-keep-modal', '#collection-modal', 
+                    '.popup-ads', '.ads-overlay', '#pds-modal'
                 ];
-                blockSelectors.forEach(s => {
+                adSelectors.forEach(s => {
                     document.querySelectorAll(s).forEach(el => {
                         try { el.style.setProperty('display', 'none', 'important'); } catch(e) {}
-                        try { el.style.setProperty('visibility', 'hidden', 'important'); } catch(e) {}
                     });
                 });
 
@@ -243,19 +241,31 @@ class ScraperAgent:
             # คลิกกล่องค้นหาหลักเพื่อเปิด Modal/Popup (ย้ำๆ จนกว่าจะขึ้น)
             print("1️⃣ คลิกเปิดกล่องพิมพ์โซน...")
             popup_opened = False
-            for attempt in range(3):
+            for attempt in range(5):
                 try:
+                    # บางครั้งต้องเลื่อนจอให้เห็นกล่องค้นหาชัดๆ ก่อนกด
                     search_box_trigger = page.locator('#box-input-search, #search_zone_input').first
-                    search_box_trigger.click(force=True)
+                    search_box_trigger.scroll_into_view_if_needed()
+                    
+                    # ลองคลิกปกติก่อน ถ้าไม่ติดใช้ Force หรือ JS
+                    search_box_trigger.click(timeout=5000)
                     self.random_sleep(1, 2)
                     
                     # เช็คว่ากล่องลิสต์โผล่มาหรือยัง
                     if page.locator("#div_zone_list").is_visible():
                         popup_opened = True
                         break
+                    else:
+                        # ถ้ายังไม่เปิด ลองวิธี JS
+                        print(f"   [Attempt {attempt+1}] Popup ไม่ขึ้น ลองเปิดด้วย JS...")
+                        page.evaluate("() => { const el = document.querySelector('#box-input-search') || document.querySelector('#search_zone_input'); if(el) el.click(); }")
+                        self.random_sleep(1, 2)
+                        if page.locator("#div_zone_list").is_visible():
+                            popup_opened = True
+                            break
                 except:
                     pass
-                print(f"   [Retry] พยายามเปิด Popup อีกครั้ง ({attempt+1}/3)...")
+                print(f"   [Retry] พยายามเปิด Popup อีกครั้ง ({attempt+1}/5)...")
             
             # 2. รอให้กล่องรายการ #div_zone_list โหลดขึ้นมา
             print("2️⃣ กำลังกวาดหารายการโซนทั้งหมดจากใน Popup (#div_zone_list)...")
@@ -395,7 +405,9 @@ class ScraperAgent:
 
                 valid_urls = []
                 seen_urls = set()
-                limit = MAX_PRICE_LIMITS.get(property_type, 999999999) 
+                # ใช้ MAX_PRICE_LIMITS จาก config, default เป็น 10 ล้านถ้าไม่รู้ประเภท
+                limit = MAX_PRICE_LIMITS.get(property_type, 10000000)
+                print(f"💰 [Price Guard] Property: '{property_type}' | Limit: {limit:,.0f}")
                 
                 for item in items:
                     url = item['url']
@@ -406,18 +418,39 @@ class ScraperAgent:
                     try:
                         is_over_budget = False
                         
-                        # สกัดตัวเลขทั้งหมดในกล่องประกาศ
-                        price_numbers = re.findall(r'(\d+(?:\.\d+)?)\s*(ล้าน)?', raw_price_data.replace(',', ''))
+                        # แยกส่วน [SALE] ออกจาก [RENT] เพราะราคาขายต่างหากที่ต้องกรอง
+                        # JS scraper แปะ label [SALE] / [RENT] ไว้ให้แล้ว
+                        if '[SALE]' in raw_price_data or '[RENT]' in raw_price_data:
+                            # มี label แบ่งชัดเจน -> เช็คเฉพาะส่วน SALE เท่านั้น
+                            sale_section = ""
+                            for part in raw_price_data.split(' | '):
+                                if '[SALE]' in part:
+                                    sale_section += part
+                            check_str = sale_section if sale_section else ""
+                        else:
+                            # ไม่มี label (fallback innerText) -> เช็คทั้งก้อน
+                            check_str = raw_price_data
                         
-                        for val, is_million in price_numbers:
-                            num = float(val)
-                            if is_million == 'ล้าน': num *= 1000000
+                        # ถ้าไม่มี SALE price เลย (ประกาศเช่าอย่างเดียว) -> ปล่อยผ่าน
+                        if check_str:
+                            clean_price_str = check_str.replace(',', '')
+                            price_numbers = re.finditer(r'(\d+(?:\.\d+)?)\s*(ล้าน)?', clean_price_str)
                             
-                            # ถ้ามีราคาใดราคาหนึ่งในประกาศ (เช่น ราคาขาย) ที่สูงเกินงบ ให้ตัดทิ้งทันที
-                            if num > limit:
-                                print(f"🚫 [Initial Guard] ตัดทิ้ง: พบราคา {num:,.0f} เกินงบ {limit:,.0f} (ข้อมูลดิบ: {raw_price_data.strip()})")
-                                is_over_budget = True
-                                break
+                            for match in price_numbers:
+                                val = float(match.group(1))
+                                unit = match.group(2) or ''
+                                
+                                if 'ล้าน' in unit:
+                                    num = val * 1000000
+                                elif val >= 100000:  # ตัวเลขโดดๆ >= 100,000 ถือว่าเป็นราคาบาท
+                                    num = val
+                                else:
+                                    continue  # เลขเล็กๆ เช่น ตร.ม., ห้อง, ชั้น -> ข้ามไป
+                                
+                                if num > limit:
+                                    print(f"🚫 [Initial Guard] ตัดทิ้ง: ราคาขาย {num:,.0f} เกินงบ {limit:,.0f} (raw: '{raw_price_data.strip()[:80]}')")
+                                    is_over_budget = True
+                                    break
                                 
                         if is_over_budget: continue
                             

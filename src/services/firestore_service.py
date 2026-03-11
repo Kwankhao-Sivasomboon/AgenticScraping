@@ -56,12 +56,58 @@ class FirestoreService:
             if 'raw_html' in data_to_save:
                 del data_to_save['raw_html']
                 
-            doc_ref.set(data_to_save)
+            # เพิ่มสถานะการซิงค์ API เข้าไปใน root document (ไว้สำหรับ Script ดึงไปทำงานต่อ)
+            if 'api_synced' not in data_to_save:
+                data_to_save['api_synced'] = False
+                
+            doc_ref.set(data_to_save, merge=True)
             
             # 2. Save Analysis Results to Sub-collection
             analysis_ref = doc_ref.collection('Analysis_Results').document('evaluation')
             analysis_ref.set(ai_analysis)
             
+            return True
+        except Exception as e:
+            print(f"Error saving to Firestore for ID {listing_id}: {e}")
+            return False
+
+    def get_unsynced_listings(self, limit=50):
+        """ดึงรายการที่ยังไม่ได้ถูกส่งเข้า Agent API"""
+        if not self.db:
+            return []
+            
+        try:
+            query = self.db.collection(self.collection_name).where("api_synced", "==", False).limit(limit)
+            results = []
+            for doc in query.stream():
+                raw_data = doc.to_dict()
+                listing_id = doc.id
+                
+                # ดึงข้อมูลจาก sub-collection
+                analysis_doc = doc.reference.collection('Analysis_Results').document('evaluation').get()
+                ai_analysis = analysis_doc.to_dict() if analysis_doc.exists else {}
+                
+                results.append({
+                    'listing_id': listing_id,
+                    'raw_data': raw_data,
+                    'ai_analysis': ai_analysis
+                })
+            return results
+        except Exception as e:
+            print(f"Error fetching unsynced listings: {e}")
+            return []
+
+    def mark_as_synced(self, listing_id, api_property_id):
+        """อัปเดตสถานะว่าส่งเข้า API แล้ว พร้อมแนบ ID อ้างอิง"""
+        if not self.db:
+            return False
+            
+        try:
+            doc_ref = self.db.collection(self.collection_name).document(str(listing_id))
+            doc_ref.update({
+                'api_synced': True,
+                'api_property_id': api_property_id
+            })
             return True
         except Exception as e:
             print(f"Error saving to Firestore for ID {listing_id}: {e}")
