@@ -198,7 +198,8 @@ def run_scraping_job(selected_type, selected_zone, max_items_override=None):
                         "-", # 23. Feedback
                         first_image, # 24. ภาพห้อง
                         "-", # 25. โหลดรูป
-                        selected_type # 26. ประเภททรัพย์
+                        selected_type, # 26. ประเภททรัพย์
+                        selected_zone # 27. โซน (Zone - Column AA)
                     ]
                     sheets.append_data(sheet_row)
                     print(f"✅ Data appended to Google Sheets (U={raw_data.get('url')[:30]}...)")
@@ -208,9 +209,11 @@ def run_scraping_job(selected_type, selected_zone, max_items_override=None):
                 print(f"🏠 [Production] Data will only be saved to Firestore. (Use sync_to_api.py to push to Agent API)")
             
             # --- ALWAYS SAVE TO FIRESTORE (As History) ---
-            print(f"💾 Saving ID {listing_id} to Firestore tracking...")
+            # แนบ zone และ property_type เข้าไปใน raw_data ก่อนบันทึก
+            raw_data['zone'] = selected_zone
+            raw_data['property_type'] = selected_type
+            print(f"💾 Saving ID {listing_id} to Firestore tracking... (zone={selected_zone}, type={selected_type})")
             if firestore.save_listing(listing_id, raw_data, ai_evaluation):
-                print(f"-> Saved ID {listing_id} to Firestore.")
                 print(f"-> Saved ID {listing_id} to Firestore.")
             else:
                 print(f"-> FAILED saving ID {listing_id} to Firestore.")
@@ -257,10 +260,20 @@ def main():
     start_time = datetime.now()
     print("=== Starting Agentic AI Scraping Workflow (Detailed Hybrid) ===")
     from src.config import PROPERTY_TYPES, TARGET_ZONES
-    import random
-    selected_type = random.choice(PROPERTY_TYPES)
-    selected_zone = random.choice(TARGET_ZONES)
-    run_scraping_job(selected_type, selected_zone)
+    
+    total_types = len(PROPERTY_TYPES)
+    total_zones = len(TARGET_ZONES)
+    total_jobs = total_types * total_zones
+    print(f"📌 วางแผนดึงข้อมูลแบบเรียงลำดับ: {total_types} ประเภทอสังหาฯ x {total_zones} โซน = {total_jobs} รอบทั้งหมด")
+    
+    current_job = 1
+    for selected_type in PROPERTY_TYPES:
+        for selected_zone in TARGET_ZONES:
+            print(f"\n=======================================================")
+            print(f"🚀 เริ่มคิวที่ {current_job}/{total_jobs}: ประเภท '{selected_type}' | โซน '{selected_zone}'")
+            print(f"=======================================================")
+            run_scraping_job(selected_type, selected_zone)
+            current_job += 1
     
     end_time = datetime.now()
     elapsed_time = end_time - start_time

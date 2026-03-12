@@ -66,7 +66,13 @@ class SheetsService:
             return False
             
         try:
-            self.sheet.append_row(data, value_input_option='USER_ENTERED')
+            # ใช้ table_range='A:A' เพื่อบังคับให้ระบบหาบรรทัดว่างจากคอลัมน์แรก 
+            # ป้องกันปัญหาข้อมูลไปต่อกันเป็นแนวนอนยาวๆ 
+            self.sheet.append_row(
+                data, 
+                value_input_option='USER_ENTERED',
+                table_range='A:A'
+            )
             return True
         except Exception as e:
             print(f"Error appending data to Google Sheet: {e}")
