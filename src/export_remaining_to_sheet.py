@@ -95,8 +95,9 @@ def export_missing_to_sheet():
                 eval_data.get("type", "-"),         # 15. S or R
                 eval_data.get("price_sell", "-"),   # 16. ราคาขาย
                 eval_data.get("price_rent", "-"),   # 17. ราคาเช่า
-                eval_data.get("size", "-"),         # 18. Area
+                eval_data.get("building_size") or eval_data.get("land_size") or eval_data.get("size", "-"), # 18. Area
                 eval_data.get("phone_number", "-"), # 19. เบอร์โทรเจ้าของ
+
                 eval_data.get("customer_name", "-"), # 20. ชื่อเจ้าของ 
                 url,                                 # 21. ลิงค์ (Column U)
                 "-", # 22. Remark

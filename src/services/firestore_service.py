@@ -83,6 +83,10 @@ class FirestoreService:
                 raw_data = doc.to_dict()
                 listing_id = doc.id
                 
+                # ข้ามรายการ Legacy Import (มีแค่ URL ไม่มีข้อมูลจริง)
+                if raw_data.get("status") == "legacy_import":
+                    continue
+                
                 # ดึงข้อมูลจาก sub-collection
                 analysis_doc = doc.reference.collection('Analysis_Results').document('evaluation').get()
                 ai_analysis = analysis_doc.to_dict() if analysis_doc.exists else {}

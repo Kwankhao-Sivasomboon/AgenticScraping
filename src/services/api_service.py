@@ -93,6 +93,32 @@ class APIService:
                 print(f"Response: {e.response.text}")
             return None
 
+    def update_property(self, property_id, payload):
+        """
+        Update an existing Property via Agent API.
+        URL: https://app.yourhome.co.th/api/agent/properties/{property_id}/update
+        """
+        print(f"🏠 Updating Property {property_id} via API...")
+        url = f"{self.base_url}/api/agent/properties/{property_id}/update"
+        headers = self._get_auth_headers()
+        
+        try:
+            # ใช้ POST (อาจจะใช้ PATCH หรือ PUT ก็ได้แล้วแต่บอคที่รับ แต่นิยมใช้ POST หากลงท้ายด้วย /update)
+            response = requests.post(url, json=payload, headers=headers, timeout=30)
+            
+            if response.status_code in [200, 201]:
+                print(f"✅ Property {property_id} updated successfully.")
+                return True
+            else:
+                print(f"⚠️ API returned {response.status_code}: {response.text}")
+                return False
+                
+        except Exception as e:
+            print(f"❌ Failed to update property {property_id}: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                print(f"Response: {e.response.text}")
+            return False
+
     def upload_photos(self, property_id, memory_files):
         """
         Upload photos for a property.

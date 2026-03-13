@@ -22,7 +22,7 @@ def get_location_details(project_name: str) -> dict:
     params = {
         "address": project_name,
         "key": api_key,
-        "language": "en", # หรือ 'th' ถ้าระบบรองรับภาษาไทยได้ดีกว่า
+        "language": "th",  # ภาษาไทย
         "region": "th"
     }
     
@@ -40,6 +40,7 @@ def get_location_details(project_name: str) -> dict:
                 "longitude": str(result["geometry"]["location"]["lng"]),
                 "state": "",
                 "city": "",
+                "sub_district": "",
                 "postal_code": "",
                 "country": ""
             }
@@ -49,10 +50,12 @@ def get_location_details(project_name: str) -> dict:
                 types = comp.get("types", [])
                 long_name = comp.get("long_name", "")
                 
-                if "administrative_area_level_1" in types:  # จังหวัด (State)
+                if "administrative_area_level_1" in types:  # จังหวัด (State/Province)
                     location_info["state"] = long_name
-                elif "locality" in types or "administrative_area_level_2" in types:  # เขต/อำเภอ (City)
+                elif "locality" in types or "administrative_area_level_2" in types:  # เขต/อำเภอ (City/District)
                     location_info["city"] = long_name
+                elif "sublocality" in types or "sublocality_level_1" in types: # แขวง/ตำบล (Sub-district)
+                    location_info["sub_district"] = long_name
                 elif "postal_code" in types:
                     location_info["postal_code"] = long_name
                 elif "country" in types:

@@ -101,8 +101,15 @@ def run_sync():
                     
                     # คัดเอาเฉพาะ URL รูปที่ AI บอกว่า valid (ผ่านการกรอง Google map, plans, etc.)
                     valid_image_urls = [image_urls[i] for i in analysis_result.valid_image_indices if i < len(image_urls)]
+                    
+                    # Fallback: ถ้า AI กรองรูปออกหมด ให้ใช้รูปทั้งหมดแทน
+                    if not valid_image_urls:
+                        print(f"  [AI] ⚠️ AI กรองรูปออกหมด (0 รูป) → Fallback ใช้รูปทั้งหมด {len(image_urls)} รูปแทน")
+                        valid_image_urls = image_urls
+                    
                     print(f"  [AI] พบรูปที่ใช้งานได้ {len(valid_image_urls)} รูป จากทั้งหมด {len(image_urls)}")
                     print(f"  [AI] สไตล์: {interior_style} | สี: {house_color} | ประเภท: {analysis_result.property_type}")
+
                     
                     # ปรับประเภททรัพย์ถ้า AI ระบุมาว่า condo หรือ house
                     if analysis_result.property_type in ["condo", "house"]:
@@ -112,15 +119,19 @@ def run_sync():
             project_name = clean(ai_evaluation.get("project_name"), "-")
             
             # ดึงค่าตั้งต้นจาก AI ก่อน
+            # city: ใช้ zone จาก Firestore ก่อน (ซิงค์มาจาก Google Sheet)
+            zone_value = raw_data.get("zone") or raw_data.get("Zone") or ""
             address_data = {
                 "address": clean(ai_evaluation.get("address"), "-"),
-                "city": clean(ai_evaluation.get("city"), "-"),
+                "city": zone_value if zone_value and zone_value != "-" else clean(ai_evaluation.get("city"), "-"),
                 "state": clean(ai_evaluation.get("state"), "-"),
+                "sub_district": "-",
                 "postal_code": clean(ai_evaluation.get("postal_code"), "-"),
                 "country": "Thailand",
                 "latitude": str(clean(ai_evaluation.get("latitude"), "0")),
                 "longitude": str(clean(ai_evaluation.get("longitude"), "0"))
             }
+
             
             # เรียกดึงจาก Maps API มาทับ
             if project_name != "-":
@@ -129,14 +140,54 @@ def run_sync():
                 
                 # ถ้า API ได้ข้อมูลมา ให้เติมในฟิลด์ที่ขาด หรือทับค่า Default ที่ไร้ประโยชน์
                 if map_lookup:
-                    for key in ["address", "city", "state", "postal_code", "country", "latitude", "longitude"]:
-                        # เติมค่าถ้าเราหาไม่ได้ หรือถ้า AI ให้ค่า Default มา
-                        if address_data[key] in ["-", "0", "", "Bangkok", "Thailand"] and map_lookup.get(key):
+                    # รายชื่อคำที่ถือเป็น Default ภาษาอังกฤษ ให้ทับด้วยภาษาไทยจาก Maps
+                    english_defaults = ["-", "0", "", "Bangkok", "Thailand", "Bangkok City", "Krung Thep Maha Nakhon", None]
+                    
+                    for key in ["address", "city", "state", "sub_district", "postal_code", "country", "latitude", "longitude"]:
+                        if address_data.get(key) in english_defaults and map_lookup.get(key):
                             address_data[key] = map_lookup[key]
+
+                    # นำ "ที่อยู่ภาษาไทย" จาก Maps มาเป็นฐาน (ถ้ามี) ถ้าไม่มีค่อยใช้จาก AI
+                    base_address = map_lookup.get("address") if map_lookup.get("address") else clean(ai_evaluation.get("address"), "")
+                    
+                    # นำ แขวง/ตำบล, เขต/อำเภอ, จังหวัด เอามาต่อรวมเพิ่ม (ตามความต้องการที่ให้ใส่เพิ่ม)
+                    # หมายเหตุ: แม้ใน base_address จะมีอยู่แล้ว แต่การใส่ "แขวง/ตำบล..." นำหน้าจะช่วยให้ระบบค้นหาง่ายขึ้น
+                    full_addr_parts = [base_address]
+                    
+                    if map_lookup.get("sub_district") and map_lookup.get("sub_district") not in base_address:
+                        full_addr_parts.append(f"แขวง/ตำบล {map_lookup['sub_district']}")
+                    if map_lookup.get("city") and map_lookup.get("city") not in base_address:
+                        full_addr_parts.append(f"เขต/อำเภอ {map_lookup['city']}")
+                    if map_lookup.get("state") and map_lookup.get("state") not in base_address:
+                        full_addr_parts.append(f"จังหวัด {map_lookup['state']}")
+                        
+                    # ต่อข้อความ โดยตัดส่วนที่ว่างทิ้ง
+                    combined_address = " ".join([p for p in full_addr_parts if p.strip() and p != "-"])
+                    address_data["address"] = combined_address if combined_address else "-"
 
             # เพิ่ม style ลงใน specifications
             if interior_style != "-":
                 specs["style"] = interior_style
+
+            # จัดการตัวเลขขนาดพื้นที่ให้สะอาดและมี Fallback (สำหรับข้อมูลเก่าที่มีแค่ size ตัวเดียว)
+            def parse_float(val):
+                if not val or val == "-": return 0
+                val_str = str(val).replace(',', '').strip()
+                return float(val_str) if val_str.replace('.', '', 1).isdigit() else 0
+
+            b_size = parse_float(ai_evaluation.get("building_size"))
+            l_size = parse_float(ai_evaluation.get("land_size"))
+            legacy_size = parse_float(ai_evaluation.get("size"))
+
+            # Fallback จากเวอร์ชันก่อนหน้าที่ AI ดึงมาแค่ "size"
+            if b_size == 0 and l_size == 0 and legacy_size > 0:
+                if selected_type == "condo" or "คอนโด" in selected_type:
+                    b_size = legacy_size
+                else:
+                    l_size = legacy_size  # บ้าน มักจะบอกขนาดเป็น ตร.ว. ในช่องเก่า
+                    
+            # ฟิลด์ area ให้ใช้ building_size เป็นหลัก ถ้าไม่มีใช้ land_size
+            final_area = b_size if b_size > 0 else l_size
 
             # --- CONSTRUCT PAYLOAD ---
             payload = {
@@ -145,7 +196,10 @@ def run_sync():
                 "customer_name": clean(ai_evaluation.get("customer_name"), "-"),
                 "contact_number": clean(ai_evaluation.get("phone_number"), "0"),
                 "line_id": clean(ai_evaluation.get("line_id"), ""),
-                "area": float(ai_evaluation.get("size", 0)) if str(ai_evaluation.get("size", "0")).replace('.','',1).isdigit() else 0,
+                "area": final_area,
+                "building_size": b_size if b_size > 0 else None,
+                "land_size": l_size if l_size > 0 else None,
+
                 # "direction": direction_str,  # เอาออกชั่วคราวเพราะ Validation ไม่ผ่าน
                 # "furnishing": DATA_MAPPING.get("furnishings").get(ai_evaluation.get("furnishing", "ไม่ระบุ"), 4),
                 "location": int(location_val), 
@@ -161,6 +215,9 @@ def run_sync():
                 "number": clean(ai_evaluation.get("house_number"), "-"), 
                 "city": address_data["city"],
                 "state": address_data["state"],
+                "district": address_data["city"],
+                "province": address_data["state"],
+                "subdistrict": address_data["sub_district"] if address_data["sub_district"] != "-" else None,
                 "country": address_data["country"],
                 "postal_code": address_data["postal_code"],
                 "latitude": address_data["latitude"],
@@ -182,6 +239,7 @@ def run_sync():
                 print(f"❌ ล้มเหลวในการสร้าง Property บน API สำหรับ ID: {listing_id}")
                 fail_count += 1
                 continue
+
                 
             print(f"✅ สร้าง Property สำเร็จ! (API Property ID: {property_id})")
             
@@ -208,7 +266,10 @@ def run_sync():
             print(f"❌ Error sync สำหรับ {listing_id}: {e}")
             fail_count += 1
             
-        time.sleep(2) # กัน API เตะออกเพราะยิงถี่เกิน
+        import random
+        sleep_time = random.uniform(10, 20)
+        print(f"💤 Sleeping for {sleep_time:.2f}s before next listing (reducing server load)...")
+        time.sleep(sleep_time)
         
     print(f"\n🎉 สรุปผลการ Sync -> สำเร็จ: {success_count} | ล้มเหลว: {fail_count}")
 

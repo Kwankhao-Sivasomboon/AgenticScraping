@@ -24,20 +24,31 @@ class PropertyImagesAnalysis(BaseModel):
     valid_image_indices: List[int] = Field(description="List of integer indices (0-based) of images that show interior rooms. Exclude: maps, floor plans, people, animals, blurry images.")
 
 
-def download_image(url: str) -> Optional[Image.Image]:
+def download_image(url: str, retries=2) -> Optional[Image.Image]:
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9,th;q=0.8",
+        "Referer": "https://www.livinginsider.com/",
+        "Connection": "keep-alive"
     }
-    try:
-        r = requests.get(url, headers=headers, timeout=15)
-        if r.status_code == 200:
-            img = Image.open(BytesIO(r.content))
-            if img.mode != "RGB":
-                img = img.convert("RGB")
-            img.thumbnail((800, 800))
-            return img
-    except Exception as e:
-        print(f"    [X] Download Error: {e}")
+    
+    for attempt in range(retries):
+        try:
+            # เพิ่ม delay นิดหน่อยเพื่อไม่ให้เซิร์ฟเวอร์โดนยิงรัวเกินไป
+            if attempt > 0:
+                time.sleep(1.5)
+                
+            r = requests.get(url, headers=headers, timeout=10)
+            if r.status_code == 200:
+                img = Image.open(BytesIO(r.content))
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                img.thumbnail((800, 800))
+                return img
+        except Exception as e:
+            if attempt == retries - 1:
+                print(f"    [X] Download Error on attempt {attempt+1}: {e}")
     return None
 
 def filter_similar_images(image_data_list: List[Dict[str, Any]], threshold: int = 5):
@@ -77,6 +88,9 @@ def analyze_room_images(image_urls: List[str]) -> Optional[PropertyImagesAnalysi
     # ดาวน์โหลดรูปภาพเก็บเป็น List ของ ข้อมูล
     downloaded_data = []
     for i, u in enumerate(image_urls):
+        # สุ่ม sleep สั้นๆ ระหว่างรูปเพื่อกันโดนบล็อก (เพิ่ม delay ขึ้นอีกเพื่อความปลอดภัยยิ่งขึ้น)
+        import random
+        time.sleep(random.uniform(1.5, 3.5))
         img = download_image(u)
         if img: 
             downloaded_data.append({"img": img, "url": u, "original_index": i})
@@ -97,7 +111,7 @@ def analyze_room_images(image_urls: List[str]) -> Optional[PropertyImagesAnalysi
     prompt = (
         "Analyze these property images. "
         "IMPORTANT INSTRUCTIONS:\n"
-        "1. Identify valid images. IGNORE and skip any images that contain animals, people, blurry content, floor plans, blueprints, maps (Google Maps), or swimming pools. Focus ONLY on the architectural structure, walls, dominant furniture, and design elements.\n"
+        "1. Identify valid images. IGNORE and skip any images that show ONLY: floor plans/blueprints, maps (e.g. Google Maps), pure outdoor scenery with no building, swimming pool-only shots, people/animals, or completely blurry images. Images that have watermarks or overlaid text are still VALID if they show an interior or exterior of a property.\n"
         "2. List the 'valid_image_indices' which corresponds to the 'Image Index' labels provided for each image. ONLY include indices of images that are VALID based on the criteria above.\n"
         "3. From the valid images, extract the Average Dominant Color (HEX) and color_name (e.g., White, Cream, Gray).\n"
         "4. Categorize the Interior Design Style into EXACTLY ONE of these styles: Modern, Nordic, Contemporary, Minimalist, Loft, Luxury, Other.\n"

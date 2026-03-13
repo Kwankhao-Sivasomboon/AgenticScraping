@@ -1,6 +1,8 @@
 import io
 import requests
 from PIL import Image
+import time
+import random
 
 class ImageService:
     def __init__(self):
@@ -37,6 +39,8 @@ class ImageService:
         """
         processed_files = []
         for i, url in enumerate(image_urls):
+            # สุ่มหน่วงเวลานิดหน่อยตามคำเรียกร้อง เพื่อไม่ให้โดนแบน (ปรับนานขึ้น)
+            time.sleep(random.uniform(2.0, 4.0))
             try:
                 print(f"⬇️ Downloading image {i+1} into RAM...")
                 response = requests.get(url, timeout=10)
