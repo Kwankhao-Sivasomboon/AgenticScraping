@@ -128,6 +128,35 @@ class APIService:
                 print(f"Response: {e.response.text}")
             return False
 
+    def get_property_status(self, property_id, retry_on_401=True):
+        """
+        Get the current status and information of a Property from Agent API.
+        URL: {{base_url}}/api/agent/properties/{property_id}/status
+        """
+        print(f"🔍 Fetching Property status for {property_id} via API...")
+        url = f"{self.base_url}/api/agent/properties/{property_id}/status"
+        headers = self._get_auth_headers()
+        
+        try:
+            response = requests.get(url, headers=headers, timeout=20)
+            
+            # --- แก้ไขปัญหา Token หมดอายุ (401) ---
+            if response.status_code == 401 and retry_on_401:
+                print("⚠️ Token หมดอายุ (401)! กำลังพยายาม Login ใหม่เพื่อขอ Token...")
+                self.token = None 
+                if self.authenticate():
+                    return self.get_property_status(property_id, retry_on_401=False)
+            
+            response.raise_for_status()
+            data = response.json()
+            return data.get('data') or data  # Return inner data if wrapped, else return whole dict
+            
+        except Exception as e:
+            print(f"❌ Failed to get property status {property_id}: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                print(f"Response: {e.response.text}")
+            return None
+
     def upload_photos(self, property_id, memory_files):
         """
         Upload photos for a property.
