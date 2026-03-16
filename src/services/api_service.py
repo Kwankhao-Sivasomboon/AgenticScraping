@@ -78,7 +78,16 @@ class APIService:
             
             # Check for conflict/duplicate
             if response.status_code == 409:
-                print("⚠️ Property already exists (Duplicate).")
+                print("⚠️ Property already exists (Duplicate). Attempting to retrieve existing ID...")
+                try:
+                    data = response.json()
+                    # พยายามหา ID จาก data.id หรือ data.data.id
+                    existing_id = data.get('id') or data.get('data', {}).get('id')
+                    if existing_id:
+                        print(f"🔗 Linked to existing API Property ID: {existing_id}")
+                        return existing_id
+                except:
+                    pass
                 return None
                 
             response.raise_for_status()

@@ -52,6 +52,13 @@ def run_sync():
         if not ai_evaluation:
             print(f"⚠️ Skipping {listing_id}: ไม่มีข้อมูล AI Analysis (อาจมีแค่ URL ใน Firestore)")
             continue
+            
+        # ✅ Guard: ข้ามประเภททรัพย์ 'อื่นๆ' ตามที่ผู้ใช้ระบุ
+        prop_type = raw_data.get("sheet_ประเภททรัพย์", "").replace(" ", "")
+        if prop_type == "อื่นๆ":
+            print(f"⏭️ ข้าม {listing_id}: ประเภททรัพย์ระบุว่าเป็น 'อื่นๆ'")
+            # เลือกที่จะไม่เปลี่ยนเป็น Sync=True เพื่อเก็บไว้จัดการทีหลัง
+            continue
         
         try:
             # ---------------------------------------------------------
@@ -91,29 +98,31 @@ def run_sync():
             interior_style = "-"
             
             if image_urls:
-                from src.room_analyzer.style_classifier import analyze_room_images
-                print(f"🤖 [AI] กำลังประเมินและคัดกรองรูปภาพ {len(image_urls)} รูป (Color, Style, Invalid images)...")
-                analysis_result = analyze_room_images(image_urls)
-                
-                if analysis_result:
-                    house_color = analysis_result.color_name
-                    interior_style = analysis_result.interior_style  # str แล้ว ไม่ต้อง .value
-                    
-                    # คัดเอาเฉพาะ URL รูปที่ AI บอกว่า valid (ผ่านการกรอง Google map, plans, etc.)
-                    valid_image_urls = [image_urls[i] for i in analysis_result.valid_image_indices if i < len(image_urls)]
-                    
-                    # Fallback: ถ้า AI กรองรูปออกหมด ให้ใช้รูปทั้งหมดแทน
-                    if not valid_image_urls:
-                        print(f"  [AI] ⚠️ AI กรองรูปออกหมด (0 รูป) → Fallback ใช้รูปทั้งหมด {len(image_urls)} รูปแทน")
-                        valid_image_urls = image_urls
-                    
-                    print(f"  [AI] พบรูปที่ใช้งานได้ {len(valid_image_urls)} รูป จากทั้งหมด {len(image_urls)}")
-                    print(f"  [AI] สไตล์: {interior_style} | สี: {house_color} | ประเภท: {analysis_result.property_type}")
-
-                    
-                    # ปรับประเภททรัพย์ถ้า AI ระบุมาว่า condo หรือ house
-                    if analysis_result.property_type in ["condo", "house"]:
-                        selected_type = analysis_result.property_type
+                # 🛑 ยกเลิกการเรียกใช้ AI ประเมินรูปภาพชั่วคราว เพื่อป้องกันการโดนแบนจากการดึงรูปเยอะๆ
+                print(f"⏩ [AI Image Filtering] ข้ามการประเมินรูปภาพ {len(image_urls)} รูปชั่วคราว (โหมดงดดึงรูป)")
+                # from src.room_analyzer.style_classifier import analyze_room_images
+                # print(f"🤖 [AI] กำลังประเมินและคัดกรองรูปภาพ {len(image_urls)} รูป (Color, Style, Invalid images)...")
+                # analysis_result = analyze_room_images(image_urls)
+                # 
+                # if analysis_result:
+                #     house_color = analysis_result.color_name
+                #     interior_style = analysis_result.interior_style  # str แล้ว ไม่ต้อง .value
+                #     
+                #     # คัดเอาเฉพาะ URL รูปที่ AI บอกว่า valid (ผ่านการกรอง Google map, plans, etc.)
+                #     valid_image_urls = [image_urls[i] for i in analysis_result.valid_image_indices if i < len(image_urls)]
+                #     
+                #     # Fallback: ถ้า AI กรองรูปออกหมด ให้ใช้รูปทั้งหมดแทน
+                #     if not valid_image_urls:
+                #         print(f"  [AI] ⚠️ AI กรองรูปออกหมด (0 รูป) → Fallback ใช้รูปทั้งหมด {len(image_urls)} รูปแทน")
+                #         valid_image_urls = image_urls
+                #     
+                #     print(f"  [AI] พบรูปที่ใช้งานได้ {len(valid_image_urls)} รูป จากทั้งหมด {len(image_urls)}")
+                #     print(f"  [AI] สไตล์: {interior_style} | สี: {house_color} | ประเภท: {analysis_result.property_type}")
+                # 
+                #     
+                #     # ปรับประเภททรัพย์ถ้า AI ระบุมาว่า condo หรือ house
+                #     if analysis_result.property_type in ["condo", "house"]:
+                #         selected_type = analysis_result.property_type
                         
             # --- GOOGLE MAPS LOOKUP ---
             project_name = clean(ai_evaluation.get("project_name"), "-")
@@ -189,12 +198,31 @@ def run_sync():
             # ฟิลด์ area ให้ใช้ building_size เป็นหลัก ถ้าไม่มีใช้ land_size
             final_area = b_size if b_size > 0 else l_size
 
+            # --- OVERRIDE WITH NEW SHEET DATA (IF AVAILABLE) ---
+            def get_sheet_val(key_name):
+                val = raw_data.get(f"sheet_{key_name}")
+                if val and str(val).strip() and str(val).strip() != "-":
+                    return str(val).strip()
+                return None
+                
+            sheet_number = get_sheet_val("เลขที่ห้อง")
+            sheet_floor = get_sheet_val("ชั้น")
+            sheet_phone = get_sheet_val("เบอร์โทรเจ้าของ")
+            sheet_owner = get_sheet_val("ชื่อเจ้าของ")
+            
+            final_number = clean(sheet_number if sheet_number else ai_evaluation.get("house_number"), "-")
+            final_phone = clean(sheet_phone if sheet_phone else ai_evaluation.get("phone_number"), "0")
+            final_owner = clean(sheet_owner if sheet_owner else ai_evaluation.get("customer_name"), "-")
+            
+            if sheet_floor:
+                specs["floors"] = sheet_floor
+
             # --- CONSTRUCT PAYLOAD ---
             payload = {
                 "owner_is_agent": True,
                 "living_level": clean(ai_evaluation.get("living_level"), "normal"),
-                "customer_name": clean(ai_evaluation.get("customer_name"), "-"),
-                "contact_number": clean(ai_evaluation.get("phone_number"), "0"),
+                "customer_name": final_owner,
+                "contact_number": final_phone,
                 "line_id": clean(ai_evaluation.get("line_id"), ""),
                 "area": final_area,
                 "building_size": b_size if b_size > 0 else None,
@@ -212,7 +240,7 @@ def run_sync():
                 "monthly_rental_price": final_rent_price if final_rent_price > 0 else 0,
                 "description": "-",
                 "address": address_data["address"],
-                "number": clean(ai_evaluation.get("house_number"), "-"), 
+                "number": final_number, 
                 "city": address_data["city"],
                 "state": address_data["state"],
                 "district": address_data["city"],
@@ -227,32 +255,45 @@ def run_sync():
                 "bathrooms": bathrooms,
                 "specifications": specs,
                 "specification_values": ai_evaluation.get("specification_values", []),
-                "property_initial_owner": clean(ai_evaluation.get("customer_name"), None),
-                "property_initial_owner_mobile_number": clean(ai_evaluation.get("phone_number"), None),
+                "property_initial_owner": final_owner if final_owner != "-" else None,
+                "property_initial_owner_mobile_number": final_phone if final_phone != "0" else None,
             }
 
-            # 4. ส่งข้อมูลเข้า Agent API สร้าง Property
-            print(f"🏠 [API] Creating property (Status: PENDING) in Agent API...")
-            property_id = api.create_property(payload)
+            # 4. ส่งข้อมูลเข้า Agent API สร้าง หรือ อัปเดต Property
+            property_id = raw_data.get("api_property_id")
             
-            if not property_id:
-                print(f"❌ ล้มเหลวในการสร้าง Property บน API สำหรับ ID: {listing_id}")
-                fail_count += 1
-                continue
-
+            if property_id:
+                # กรณีมี ID อยู่แล้ว -> สั่ง Update จบๆ
+                print(f"🏠 [API] Updating existing property {property_id}...")
+                success = api.update_property(property_id, payload)
+                if not success:
+                    print(f"❌ อัปเดตล้มเหลว ข้ามไปก่อน...")
+                    fail_count += 1
+                    continue
+            else:
+                # กรณีไม่มี ID -> สั่ง Create
+                print(f"🏠 [API] Creating new property...")
+                property_id = api.create_property(payload)
                 
-            print(f"✅ สร้าง Property สำเร็จ! (API Property ID: {property_id})")
+                if not property_id:
+                    print(f"⚠️ สร้างไม่สำเร็จ (อาจจะซ้ำ หรือ Error) ข้ามไปก่อน...")
+                    fail_count += 1
+                    continue
+                print(f"✅ สร้างใหม่สำเร็จ! ID: {property_id}")
             
             # 5. ซิงค์รูปภาพและลบลายน้ำ (Image Processing & Uploading)
+            # 🛑 ปิดการดึงรูปชั่วคราว (เนื่องจากโดนบล็อคจากเว็บต้นทาง) เพื่อสร้างแค่ Property ก่อน
             if valid_image_urls:
-                print(f"🖼️ [Images] กำลังโหลดและลบลายน้ำ {len(valid_image_urls)} ภาพ...")
-                processed_photos = image_svc.process_images(valid_image_urls)
-                if processed_photos:
-                    print(f"📤 กำลังอัปโหลดภาพเข้า Agent API...")
-                    api.upload_photos(property_id, processed_photos)
-                    print(f"✅ อัปโหลดภาพเสร็จสิ้น!")
-                else:
-                    print(f"⚠️ โหลดภาพไม่สำเร็จ ข้ามการอัปโหลด")
+                print(f"⏩ [Images] ข้ามการดึงและอัปโหลดรูปภาพชั่วคราว (มีรูปในระบบ {len(valid_image_urls)} ภาพ แต่อยู่ในโหมดงดดึง)")
+                # (โค้ดเก่าถูก Comment ไว้เผื่อใช้ในอนาคต)
+                # print(f"🖼️ [Images] กำลังโหลดและลบลายน้ำ {len(valid_image_urls)} ภาพ...")
+                # processed_photos = image_svc.process_images(valid_image_urls)
+                # if processed_photos:
+                #     print(f"📤 กำลังอัปโหลดภาพเข้า Agent API...")
+                #     api.upload_photos(property_id, processed_photos)
+                #     print(f"✅ อัปโหลดภาพเสร็จสิ้น!")
+                # else:
+                #     print(f"⚠️ โหลดภาพไม่สำเร็จ ข้ามการอัปโหลด")
 
             # 6. อัปเดตสถานะใน Firestore ว่า Sync เสร็จแล้ว
             if firestore.mark_as_synced(listing_id, property_id):
