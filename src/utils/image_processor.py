@@ -39,8 +39,8 @@ class ImageService:
         """
         processed_files = []
         for i, url in enumerate(image_urls):
-            # สุ่มหน่วงเวลานิดหน่อยตามคำเรียกร้อง เพื่อไม่ให้โดนแบน (ปรับนานขึ้น)
-            time.sleep(random.uniform(2.0, 4.0))
+            # หน่วงเวลาเล็กน้อยเพื่อป้องกันข้อผิดพลาดในการดาวน์โหลดรัวๆ
+            time.sleep(random.uniform(0.1, 0.5))
             try:
                 print(f"⬇️ Downloading image {i+1} into RAM...")
                 response = requests.get(url, timeout=10)

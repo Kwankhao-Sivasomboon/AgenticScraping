@@ -17,8 +17,8 @@ load_dotenv()
 # 🛑 ตั้งค่าสำหรับการดึงข้อมูล (เปลี่ยนได้ที่นี่)
 # ==========================================
 NEW_SHEET_URL = "https://docs.google.com/spreadsheets/d/1hHMSBt89Q22v0lO3mJmHsMEDTbZAXdlsaXNPsGkrP58/edit?gid=2052102924#gid=2052102924" # <-- ใส่ลิงก์ Google Sheet ใหม่ที่นี่ (ถ้าไม่ได้ตั้งไว้ใน .env)
-SHEET_TAB_NAME = "Condo @ 4-Alley" # <-- เปลี่ยนเป็นชื่อแท็บที่ต้องการ เช่น 'ข้อมูลใหม่'
-UPLOAD_ZONE = "บางนา" # <-- Zone ที่ต้องการให้ยัดใส่ลงไปใน Firestore (คุณแก้ได้เรื่อยๆ ก่อนรัน)
+SHEET_TAB_NAME = "Condo @ On Nut" # <-- เปลี่ยนเป็นชื่อแท็บที่ต้องการ เช่น 'ข้อมูลใหม่'
+UPLOAD_ZONE = "อ่อนนุช" # <-- Zone ที่ต้องการให้ยัดใส่ลงไปใน Firestore (คุณแก้ได้เรื่อยๆ ก่อนรัน)
 # ==========================================
 
 
@@ -49,19 +49,36 @@ def run_import():
 
     # ดึงข้อมูลทั้งหมดจาก Sheet
     print(f"📥 กำลังดึงข้อมูลจาก {tab_name}...")
-    records = worksheet.get_all_records()
-    if not records:
+    raw_values = worksheet.get_all_values()
+    if not raw_values or len(raw_values) < 2:
         print("⚠️ แท็บนี้ไม่มีข้อมูล หรืออ่าน header ไม่เจอ")
         return
         
+    headers = raw_values[0]
+    records = []
+    for row_vals in raw_values[1:]:
+        record = {}
+        for idx, h in enumerate(headers):
+            h_clean = h.strip()
+            if h_clean: # เก็บเฉพาะคอลัมน์ที่มีชื่อหัวตาราง
+                record[h_clean] = row_vals[idx] if idx < len(row_vals) else ""
+        records.append(record)
+        
     print(f"📝 พบข้อมูลทั้งหมด {len(records)} แถวใน Google Sheet")
     
-    # 2. เชื่อม Firestore
-    print("🔥 Authenticating Firestore...")
     firestore = FirestoreService()
     if not firestore.db:
         print("❌ เชื่อมตัวกับ Firestore ไม่สำเร็จ")
         return
+        
+    # --- TEST MODE LOGIC ---
+    test_choice = input("💬 ต้องการทดสอบกี่รายการ? (ใส่ตัวเลข หรือพิมพ์ 'all' เพื่อรันทั้งหมด): ").strip().lower()
+    limit = None
+    if test_choice.isdigit():
+        limit = int(test_choice)
+        print(f"🛠️ โหมดทดสอบ: จะประมวลผลเพียง {limit} รายการแรก")
+    else:
+        print("🚀 โหมดปกติ: จะประมวลผลทั้งหมด")
         
     zone_input = input(f"💬 กรุณาใส่ Zone ที่ต้องการกำหนดให้ข้อมูลพวกนี้ (เช่น 'อ่อนนุช', ค่าเริ่มต้น '{UPLOAD_ZONE}'): ").strip() or UPLOAD_ZONE
 
@@ -70,7 +87,13 @@ def run_import():
     fail_count = 0
 
     for i, row in enumerate(records, start=2): # +2 เพราะ header คือ 1 และ index เริ่มจาก 0
-        link = str(row.get('ลิงค์', '')).strip()
+        # เช็ค Limit
+        if limit is not None and success_count + duplicate_count >= limit:
+            print(f"\n✋ ครบกำหนด {limit} รายการตามที่แจ้งไว้ในโหมดทดสอบแล้ว หยุดการทำงาน...")
+            break
+            
+        # หาคอลัมน์ลิงค์แบบยืดหยุ่น (เผื่อก๊อปปี้มาแล้วตั้งชื่อว่า 'ลิงค์', 'Link', หรือ 'URL')
+        link = str(row.get('ลิงค์', row.get('Link', row.get('URL', '')))).strip()
         if not link:
             continue
             
@@ -78,7 +101,14 @@ def run_import():
         print(f"🔍 กำลังตรวจสอบแถวที่ {i}: {row.get('ชื่อโครงการ', 'ไม่ระบุ')}")
         
         # 3. เช็ค Duplicate (จาก Field 'url' ใน Firestore)
-        new_listing_id = f"ImportSheet_{uuid.uuid4().hex[:8]}"
+        # พยายามดึง ID จากลิงก์ (เช่น gDgDjg_CjfgygI) เพื่อความสวยงามและไล่ข้อมูลง่าย
+        extracted_id = None
+        if "istockdetail/" in link:
+            try:
+                extracted_id = link.split("istockdetail/")[1].split(".html")[0]
+            except: pass
+            
+        new_listing_id = extracted_id if extracted_id else f"ImportSheet_{uuid.uuid4().hex[:8]}"
         is_update = False
         
         try:
@@ -93,30 +123,21 @@ def run_import():
             fail_count += 1
             continue
 
-        # สร้างข้อมูลอัปเดต (จะนำไปใส่ใน Root Document ของ Firestore สำหรับให้ดูผ่าน Firebase หรือ Export)
+        # สร้างข้อมูลอัปเดต (ดึงแบบไดนามิกตามคอลัมน์ที่มีใน Sheet)
         raw_data_updates = {
             "zone": zone_input,
-            "sheet_date_added": str(row.get('วันที่ลงข้อมูล', '')).strip(),
-            "sheet_latest_contact": str(row.get('ติดต่อล่าสุด', '')).strip(),
-            "sheet_contact_status": str(row.get('สถานะการโทร', '')).strip(),
-            "sheet_is_available": str(row.get('อยู่ไหม', '')).strip(),
-            "sheet_can_scan": str(row.get('ขอสแกน', '')).strip(),
-            "sheet_want_marketing": str(row.get('ขอทำการตลาด', '')).strip(),
-            "sheet_view_room": str(row.get('เข้าดูห้อง', '')).strip(),
-            "sheet_scan": str(row.get('สแกน', '')).strip(),
-            "sheet_know_direction": str(row.get('รู้ทิศ', '')).strip(),
-            "sheet_add_data": str(row.get('ลงข้อมูล', '')).strip(),
-            "sheet_scan_date": str(row.get('วันนัดสแกน', '')).strip(),
-            "sheet_more_rooms": str(row.get('ห้องเพิ่มเติม', '')).strip(),
-            "sheet_feedback": str(row.get('Feedback', '')).strip()
+            "status": "new_sheet" # บันทึกสถานะตามที่ขอ แทนที่จะปล่อยเป็น active ธรรมดา
         }
         
-        # จัดการ Remark หลายๆ คอลัมน์ (เผื่อมี 2 อันแบบในตัวอย่าง)
-        remarks = []
+        # วนลูปดึงข้อมูลทุกคอลัมน์ที่มีอยู่ใน Sheet แบบไม่ต้องตั้งชื่อ Fix ไว้ก่อนเลย
         for key, value in row.items():
-            if 'Remark' in str(key) and str(value).strip():
-                remarks.append(str(value).strip())
-        raw_data_updates["sheet_remark"] = " | ".join(remarks)
+            k_str = str(key).strip()
+            v_str = str(value).strip()
+            if not k_str:
+                continue
+                
+            # เอาข้อมูลทุกช่องใส่แบบไดนามิก (ป้องกันทับ field หลักของระบบด้วยคำนำหน้า sheet_)
+            raw_data_updates[f"sheet_{k_str}"] = v_str
 
 
         # แปลงข้อมูลราคา (ลบเครื่องหมาย ฿, คอมมา, และช่องว่างทิ้ง)
@@ -145,7 +166,7 @@ def run_import():
                 "sell_price": sell_price,
                 "rent_price": rent_price,
                 "type": "sale" if 's' in str(row.get('S or R', '')).lower() else ("rent" if 'r' in str(row.get('S or R', '')).lower() else "sale"),
-                "status": "active",
+                "status": "new_sheet",
                 "api_synced": False # ตั้งเป็น False เพื่อให้ระบบหลักดึงไปอัปโหลดเข้า Agent API !
             }
             raw_data.update(raw_data_updates) # รวมฟิลด์พิเศษจากชีตเข้าไปด้วย
@@ -164,7 +185,7 @@ def run_import():
                 "specifications": {
                     "floors": str(row.get('ชั้น', '-')).strip()
                 },
-                "description": f"ข้อมูลเพิ่มเติม: ทิศ {str(row.get('รู้ทิศ', '-')).strip()} | {raw_data_updates['sheet_remark']}",
+                "description": f"ข้อมูลเพิ่มเติม: ทิศ {str(row.get('รู้ทิศ', '-')).strip()}",
                 "address": "-", 
                 "living_level": "normal"
             }
@@ -195,10 +216,17 @@ def run_import():
                 area_val = str(row.get('Area', '')).strip()
                 if area_val and area_val != '-':
                     analysis_update["building_size"] = area_val
+                
+                # --- อัปเดตข้อมูลเพิ่มเติมเข้า Description (เฉพาะ ทิศ) ---
+                direction = str(row.get('รู้ทิศ', '-')).strip()
+                analysis_update["description"] = f"ข้อมูลเพิ่มเติม: ทิศ {direction}"
                     
                 if analysis_update:
                     analysis_ref = doc_ref.collection('Analysis_Results').document('evaluation')
                     analysis_ref.set(analysis_update, merge=True)
+                    
+                # ตั้งค่าให้กลับมา Sync ใหม่ เพราะข้อมูลเปลี่ยน
+                doc_ref.update({"api_synced": False, "status": "new_sheet"})
                     
                 print(f"✅ อัปเดตข้อมูลเพิ่มเติมให้ {new_listing_id} แล้ว")
                 duplicate_count += 1 # นับรวมในช่องซ้ำ (แต่อัปเดตแล้ว)

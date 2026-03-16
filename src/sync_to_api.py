@@ -267,8 +267,8 @@ def run_sync():
             fail_count += 1
             
         import random
-        sleep_time = random.uniform(10, 20)
-        print(f"💤 Sleeping for {sleep_time:.2f}s before next listing (reducing server load)...")
+        sleep_time = random.uniform(1.0, 3.0)
+        print(f"💤 Sleeping for {sleep_time:.2f}s before next listing...")
         time.sleep(sleep_time)
         
     print(f"\n🎉 สรุปผลการ Sync -> สำเร็จ: {success_count} | ล้มเหลว: {fail_count}")
