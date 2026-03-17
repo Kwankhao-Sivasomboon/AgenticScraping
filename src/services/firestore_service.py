@@ -40,7 +40,7 @@ class FirestoreService:
             # If error, maybe assume it doesn't exist to process it, or assume it does to be safe. 
             return False
 
-    def save_listing(self, listing_id, raw_data, ai_analysis):
+    def save_listing(self, listing_id, raw_data, ai_analysis, zone=None):
         """
         Data Integrity: Save Raw Data to Document and AI Analysis to Sub-collection.
         """
@@ -59,6 +59,9 @@ class FirestoreService:
             # เพิ่มสถานะการซิงค์ API เข้าไปใน root document (ไว้สำหรับ Script ดึงไปทำงานต่อ)
             if 'api_synced' not in data_to_save:
                 data_to_save['api_synced'] = False
+                
+            if zone:
+                data_to_save['zone'] = zone
                 
             doc_ref.set(data_to_save, merge=True)
             

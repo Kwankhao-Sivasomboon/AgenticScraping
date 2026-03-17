@@ -102,10 +102,6 @@ def run_image_scraper():
                 '--disable-blink-features=AutomationControlled'
             ]
         )
-        context = browser.new_context(
-            viewport={'width': 1920, 'height': 1080},
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        )
         
         success_count = 0
         fail_count = 0
@@ -115,7 +111,24 @@ def run_image_scraper():
             doc_id = item['id']
             url = item['url']
             
-            # ✨ เปิดหน้าใหม่ทุกลำดับเพื่อลดการสะสมของ RAM
+            # 🛡️ รีสตาร์ท Browser ทุกๆ 10 รายการเพื่อล้าง RAM ที่อาจค้างในระดับเบราว์เซอร์
+            if i > 1 and i % 10 == 0:
+                print("♻️ รีสตาร์ท Browser เพื่อล้าง RAM ค้างสะสม...")
+                browser.close()
+                browser = browser_type.launch(
+                    headless=not SHOW_BROWSER,
+                    args=[
+                        '--no-sandbox',
+                        '--disable-setuid-sandbox',
+                        '--disable-blink-features=AutomationControlled'
+                    ]
+                )
+
+            # ✨ สร้าง Context ใหม่ และ Page ใหม่ทุกลำดับเพื่อล้าง Cache/RAM ให้สะอาดที่สุด
+            context = browser.new_context(
+                viewport={'width': 1920, 'height': 1080},
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            )
             page = context.new_page()
             stealth_sync(page)
             
@@ -151,8 +164,9 @@ def run_image_scraper():
                 print(f"❌ ดึงข้อมูลลิงก์ {url} ไม่สำเร็จ: {e}")
                 fail_count += 1
             finally:
-                # 🛡️ ปิดหน้าเว็บทุกครั้งเพื่อคืน RAM
+                # 🛡️ ปิดหน้าเว็บและ Context ทุกครั้งเพื่อคืน RAM ทันที
                 page.close()
+                context.close()
                 
             # พักหายใจก่อนเข้าหน้าถัดไป
             sleep_time = random.uniform(2, 5)

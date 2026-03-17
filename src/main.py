@@ -198,7 +198,8 @@ def run_scraping_job(selected_type, selected_zone, max_items_override=None):
                         "-", # 23. Feedback
                         first_image, # 24. ภาพห้อง
                         "-", # 25. โหลดรูป
-                        selected_type # 26. ประเภททรัพย์
+                        selected_type, # 26. ประเภททรัพย์
+                        selected_zone  # 27. โซน (Column AA)
                     ]
                     sheets.append_data(sheet_row)
                     print(f"✅ Data appended to Google Sheets (U={raw_data.get('url')[:30]}...)")
@@ -208,8 +209,8 @@ def run_scraping_job(selected_type, selected_zone, max_items_override=None):
                 print(f"🏠 [Production] Data will only be saved to Firestore. (Use sync_to_api.py to push to Agent API)")
             
             # --- ALWAYS SAVE TO FIRESTORE (As History) ---
-            print(f"💾 Saving ID {listing_id} to Firestore tracking...")
-            if firestore.save_listing(listing_id, raw_data, ai_evaluation):
+            print(f"💾 Saving ID {listing_id} to Firestore tracking (Zone: {selected_zone})...")
+            if firestore.save_listing(listing_id, raw_data, ai_evaluation, zone=selected_zone):
                 print(f"-> Saved ID {listing_id} to Firestore.")
                 print(f"-> Saved ID {listing_id} to Firestore.")
             else:
@@ -257,10 +258,26 @@ def main():
     start_time = datetime.now()
     print("=== Starting Agentic AI Scraping Workflow (Detailed Hybrid) ===")
     from src.config import PROPERTY_TYPES, TARGET_ZONES
-    import random
-    selected_type = random.choice(PROPERTY_TYPES)
-    selected_zone = random.choice(TARGET_ZONES)
-    run_scraping_job(selected_type, selected_zone)
+    from src.config import PROPERTY_TYPES, TARGET_ZONES
+    
+    total_combinations = len(PROPERTY_TYPES) * len(TARGET_ZONES)
+    current_count = 0
+    
+    print(f"📋 Total combinations to process: {total_combinations}")
+    
+    for p_type in PROPERTY_TYPES:
+        for p_zone in TARGET_ZONES:
+            current_count += 1
+            print(f"\n{'='*50}")
+            print(f"🔄 Progress: {current_count}/{total_combinations}")
+            print(f"📍 Job: Property Type: '{p_type}' | Zone: '{p_zone}'")
+            print(f"{'='*50}")
+            
+            try:
+                run_scraping_job(p_type, p_zone)
+            except Exception as e:
+                print(f"❌ Error in job {p_type} / {p_zone}: {e}")
+                continue
     
     end_time = datetime.now()
     elapsed_time = end_time - start_time
