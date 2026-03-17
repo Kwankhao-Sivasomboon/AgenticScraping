@@ -27,8 +27,9 @@ def run_sync():
         return
         
     # 2. ดึงข้อมูลที่ยังไม่ได้ Sync
-    print("📦 กำลังค้นหาข้อมูลใน Firestore ที่ยังไม่ได้ส่งเข้า API...")
-    unsynced_listings = firestore.get_unsynced_listings(limit=MAX_ITEMS_PER_RUN)
+    target_zone = "บางนา" # ระบุโซนที่ต้องการ Sync (หรือใส่ None เพื่อเอาทุกโซน)
+    print(f"📦 กำลังค้นหาข้อมูลใน Firestore โซน '{target_zone}' ที่ยังไม่ได้ส่งเข้า API...")
+    unsynced_listings = firestore.get_unsynced_listings(limit=MAX_ITEMS_PER_RUN, zone=target_zone, api_synced_status=True)
     
     if not unsynced_listings:
         print("✅ ไม่พบรายการที่รอการ Sync (ทุกรายการส่งขึ้น API หมดแล้ว)")
@@ -48,6 +49,11 @@ def run_sync():
         print(f"\n======================================")
         print(f"🔄 กำลังประมวลผล Listing ID: {listing_id}")
         
+        # ✅ Guard: ยกเว้นรายการนำเข้าจาก Facebook (รหัสขึ้นต้นด้วย ImportSheet)
+        if str(listing_id).startswith("ImportSheet"):
+            print(f"⏭️ ข้าม {listing_id}: เป็นรายการนำเข้าจาก Facebook ซึ่งยังไม่มีรูประบบอัตโนมัติ")
+            continue
+            
         # ✅ Guard: ถ้าไม่มีข้อมูล AI Analysis (มีแค่ URL ใน Firestore) ให้ข้ามไปครับ
         if not ai_evaluation:
             print(f"⚠️ Skipping {listing_id}: ไม่มีข้อมูล AI Analysis (อาจมีแค่ URL ใน Firestore)")
@@ -94,56 +100,60 @@ def run_sync():
             # --- AI IMAGE ANALYSIS FOR STYLE & FILTERING ---
             image_urls = raw_data.get("images", [])
             valid_image_urls = image_urls
-            house_color = "-"
-            interior_style = "-"
+            house_color = raw_data.get("color", "-")
+            interior_style = raw_data.get("style", "-")
             
             if image_urls:
-                # 🛑 ยกเลิกการเรียกใช้ AI ประเมินรูปภาพชั่วคราว เพื่อป้องกันการโดนแบนจากการดึงรูปเยอะๆ
-                print(f"⏩ [AI Image Filtering] ข้ามการประเมินรูปภาพ {len(image_urls)} รูปชั่วคราว (โหมดงดดึงรูป)")
-                # from src.room_analyzer.style_classifier import analyze_room_images
-                # print(f"🤖 [AI] กำลังประเมินและคัดกรองรูปภาพ {len(image_urls)} รูป (Color, Style, Invalid images)...")
-                # analysis_result = analyze_room_images(image_urls)
-                # 
-                # if analysis_result:
-                #     house_color = analysis_result.color_name
-                #     interior_style = analysis_result.interior_style  # str แล้ว ไม่ต้อง .value
-                #     
-                #     # คัดเอาเฉพาะ URL รูปที่ AI บอกว่า valid (ผ่านการกรอง Google map, plans, etc.)
-                #     valid_image_urls = [image_urls[i] for i in analysis_result.valid_image_indices if i < len(image_urls)]
-                #     
-                #     # Fallback: ถ้า AI กรองรูปออกหมด ให้ใช้รูปทั้งหมดแทน
-                #     if not valid_image_urls:
-                #         print(f"  [AI] ⚠️ AI กรองรูปออกหมด (0 รูป) → Fallback ใช้รูปทั้งหมด {len(image_urls)} รูปแทน")
-                #         valid_image_urls = image_urls
-                #     
-                #     print(f"  [AI] พบรูปที่ใช้งานได้ {len(valid_image_urls)} รูป จากทั้งหมด {len(image_urls)}")
-                #     print(f"  [AI] สไตล์: {interior_style} | สี: {house_color} | ประเภท: {analysis_result.property_type}")
-                # 
-                #     
-                #     # ปรับประเภททรัพย์ถ้า AI ระบุมาว่า condo หรือ house
-                #     if analysis_result.property_type in ["condo", "house"]:
-                #         selected_type = analysis_result.property_type
+                from src.room_analyzer.style_classifier import analyze_room_images
+                print(f"🤖 [AI] กำลังใช้ AI คัดกรองรูปภาพ {len(image_urls)} รูป (ภายใน/ภายนอก)...")
+                analysis_result = analyze_room_images(image_urls)
+                
+                if analysis_result:
+                    # ถ้ามี color ใน Firestore ใช้ของ Firestore ก่อน ไม่งั้นใช้ AI
+                    if house_color == "-":
+                        house_color = analysis_result.color_name
+                    if interior_style == "-":
+                        interior_style = analysis_result.interior_style  # str แล้ว ไม่ต้อง .value
+                    
+                    # คัดเอาเฉพาะ URL รูปภาพที่ AI บอกว่า valid (สแกนแต่พวกมุมห้อง/นอกบ้าน จริงๆ)
+                    valid_image_urls = [image_urls[i] for i in analysis_result.valid_image_indices if i < len(image_urls)]
+                    
+                    # Fallback: ถ้า AI กรองรูปออกหมด ให้ใช้รูปทั้งหมดแทน
+                    if not valid_image_urls:
+                        print(f"  [AI] ⚠️ AI กรองรูปออกหมด (0 รูป) → Fallback ใช้รูปทั้งหมด {len(image_urls)} รูปแทน")
+                        valid_image_urls = image_urls
+                    
+                    print(f"  [AI] พบรูปที่ใช้งานได้ {len(valid_image_urls)} รูป จากทั้งหมด {len(image_urls)}")
+                    print(f"  [Info] สไตล์: {interior_style} | สี: {house_color}")
+                    
+                    # ปรับประเภททรัพย์ถ้า AI ระบุมาว่า condo หรือ house (กรณี AI ทำได้แม่นกว่า)
+                    if analysis_result.property_type in ["condo", "house"] and "คอนโด" not in selected_type:
+                        selected_type = analysis_result.property_type
                         
             # --- GOOGLE MAPS LOOKUP ---
             project_name = clean(ai_evaluation.get("project_name"), "-")
             
-            # ดึงค่าตั้งต้นจาก AI ก่อน
-            # city: ใช้ zone จาก Firestore ก่อน (ซิงค์มาจาก Google Sheet)
             zone_value = raw_data.get("zone") or raw_data.get("Zone") or ""
+            fs_lat = clean(raw_data.get("latitude"))
+            fs_lng = clean(raw_data.get("longitude"))
+            fs_address = clean(raw_data.get("address"))
+            
             address_data = {
-                "address": clean(ai_evaluation.get("address"), "-"),
-                "city": zone_value if zone_value and zone_value != "-" else clean(ai_evaluation.get("city"), "-"),
-                "state": clean(ai_evaluation.get("state"), "-"),
-                "sub_district": "-",
-                "postal_code": clean(ai_evaluation.get("postal_code"), "-"),
-                "country": "Thailand",
-                "latitude": str(clean(ai_evaluation.get("latitude"), "0")),
-                "longitude": str(clean(ai_evaluation.get("longitude"), "0"))
+                "address": fs_address if fs_address else clean(ai_evaluation.get("address"), "-"),
+                "city": raw_data.get("city") or (zone_value if zone_value and zone_value != "-" else clean(ai_evaluation.get("city"), "-")),
+                "state": raw_data.get("state") or clean(ai_evaluation.get("state"), "-"),
+                "sub_district": raw_data.get("subdistrict") or "-",
+                "postal_code": raw_data.get("postal_code") or clean(ai_evaluation.get("postal_code"), "-"),
+                "country": raw_data.get("country") or "Thailand",
+                "latitude": str(fs_lat) if fs_lat else str(clean(ai_evaluation.get("latitude"), "0")),
+                "longitude": str(fs_lng) if fs_lng else str(clean(ai_evaluation.get("longitude"), "0"))
             }
 
-            
+            # พิจารณาว่าเรามีข้อมูล Location ใน Firestore มั่นคงหรือยัง (ถ้ามีแล้ว จะไม่ดึง MAPS API ใหม่อีก)
+            need_map_lookup = not fs_lat or not fs_lng or str(fs_lat) in ["0", "0.0", ""]
+
             # เรียกดึงจาก Maps API มาทับ
-            if project_name != "-":
+            if need_map_lookup and project_name != "-":
                 from src.services.maps_service import get_location_details
                 map_lookup = get_location_details(project_name)
                 
@@ -260,48 +270,54 @@ def run_sync():
             }
 
             # 4. ส่งข้อมูลเข้า Agent API สร้าง หรือ อัปเดต Property
-            property_id = raw_data.get("api_property_id")
+            # สำหรับระบบ Test: เราจะมองข้าม api_property_id เดิมที่เคยได้มาจากระบบ Prod
+            # แล้วบังคับให้ 'สร้างใหม่' (Create) เสมอ เพื่อให้ได้ข้อมูล lat,long,address ที่มีอยู่แล้วไปใช้ใน Test API
             
-            if property_id:
-                # กรณีมี ID อยู่แล้ว -> สั่ง Update จบๆ
-                print(f"🏠 [API] Updating existing property {property_id}...")
-                success = api.update_property(property_id, payload)
-                if not success:
-                    print(f"❌ อัปเดตล้มเหลว ข้ามไปก่อน...")
-                    fail_count += 1
-                    continue
-            else:
-                # กรณีไม่มี ID -> สั่ง Create
-                print(f"🏠 [API] Creating new property...")
-                property_id = api.create_property(payload)
-                
-                if not property_id:
-                    print(f"⚠️ สร้างไม่สำเร็จ (อาจจะซ้ำ หรือ Error) ข้ามไปก่อน...")
-                    fail_count += 1
-                    continue
-                print(f"✅ สร้างใหม่สำเร็จ! ID: {property_id}")
+            # property_id = raw_data.get("api_property_id")
+            # 
+            # if property_id:
+            #     # กรณีมี ID อยู่แล้ว -> สั่ง Update จบๆ
+            #     print(f"🏠 [API] Updating existing property {property_id}...")
+            #     success = api.update_property(property_id, payload)
+            #     if not success:
+            #         print(f"❌ อัปเดตล้มเหลว ข้ามไปก่อน...")
+            #         fail_count += 1
+            #         continue
+            # else:
+            
+            # กรณีระบบ Test -> สั่ง Create เสมอ
+            print(f"🏠 [API Test System] Forcing Create new property...")
+            property_id = api.create_property(payload)
+            
+            if not property_id:
+                print(f"⚠️ สร้างไม่สำเร็จ (อาจจะซ้ำ หรือ Error) ข้ามไปก่อน...")
+                fail_count += 1
+                continue
+            print(f"✅ สร้างใหม่สำเร็จ! ได้ ID ใหม่จากระบบ Test: {property_id}")
             
             # 5. ซิงค์รูปภาพและลบลายน้ำ (Image Processing & Uploading)
-            # 🛑 ปิดการดึงรูปชั่วคราว (เนื่องจากโดนบล็อคจากเว็บต้นทาง) เพื่อสร้างแค่ Property ก่อน
             if valid_image_urls:
-                print(f"⏩ [Images] ข้ามการดึงและอัปโหลดรูปภาพชั่วคราว (มีรูปในระบบ {len(valid_image_urls)} ภาพ แต่อยู่ในโหมดงดดึง)")
-                # (โค้ดเก่าถูก Comment ไว้เผื่อใช้ในอนาคต)
-                # print(f"🖼️ [Images] กำลังโหลดและลบลายน้ำ {len(valid_image_urls)} ภาพ...")
-                # processed_photos = image_svc.process_images(valid_image_urls)
-                # if processed_photos:
-                #     print(f"📤 กำลังอัปโหลดภาพเข้า Agent API...")
-                #     api.upload_photos(property_id, processed_photos)
-                #     print(f"✅ อัปโหลดภาพเสร็จสิ้น!")
-                # else:
-                #     print(f"⚠️ โหลดภาพไม่สำเร็จ ข้ามการอัปโหลด")
+                image_svc = ImageService()
+                
+                print(f"🖼️ [Images] กำลังโหลดและลบลายน้ำ {len(valid_image_urls)} ภาพ...")
+                processed_photos = image_svc.process_images(valid_image_urls)
+                if processed_photos:
+                    print(f"📤 กำลังอัปโหลดภาพเข้า Agent API...")
+                    api.upload_photos(property_id, processed_photos)
+                    print(f"✅ อัปโหลดภาพเสร็จสิ้น!")
+                else:
+                    print(f"⚠️ โหลดภาพไม่สำเร็จ ข้ามการอัปโหลด")
 
             # 6. อัปเดตสถานะใน Firestore ว่า Sync เสร็จแล้ว
-            if firestore.mark_as_synced(listing_id, property_id):
-                print(f"💾 อัปเดตสถานะใน Firestore เป็น 'Synced' เรียบร้อยแล้ว")
-                success_count += 1
-            else:
-                print(f"⚠️ สร้างเสร็จแต่อัปเดต Firestore ไม่ได้ (โปรดระวัง Data ซ้ำในอนาคต)")
-                fail_count += 1
+            # เนื่องจากเป็นการยิงเข้า Test API เราจะไม่แก้ไขสถานะใดๆ ใน Database
+            # if firestore.mark_as_synced(listing_id, property_id):
+            #     print(f"💾 อัปเดตสถานะใน Firestore เป็น 'Synced' เรียบร้อยแล้ว")
+            #     success_count += 1
+            # else:
+            #     print(f"⚠️ สร้างเสร็จแต่อัปเดต Firestore ไม่ได้ (โปรดระวัง Data ซ้ำในอนาคต)")
+            #     fail_count += 1
+            print(f"⏭️ ข้ามการบันทึก Database เพราะอยู่ในโหมด Test")
+            success_count += 1
                 
         except Exception as e:
             print(f"❌ Error sync สำหรับ {listing_id}: {e}")

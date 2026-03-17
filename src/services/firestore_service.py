@@ -71,13 +71,22 @@ class FirestoreService:
             print(f"Error saving to Firestore for ID {listing_id}: {e}")
             return False
 
-    def get_unsynced_listings(self, limit=50):
-        """ดึงรายการที่ยังไม่ได้ถูกส่งเข้า Agent API"""
+    def get_unsynced_listings(self, limit=50, zone=None, api_synced_status=False):
+        """ดึงรายการตามสถานะการซิงค์ (ค่าเริ่มต้นคือดึงที่ยังไม่ซิงค์)"""
         if not self.db:
             return []
             
         try:
-            query = self.db.collection(self.collection_name).where("api_synced", "==", False).limit(limit)
+            # ค้นหาตามสถานะ api_synced ที่ต้องการ (True/False)
+            query = self.db.collection(self.collection_name).where("api_synced", "==", api_synced_status)
+            
+            if zone:
+                # กรองเฉพาะโซนที่ระบุ (รองรับทั้ง zone และ Zone)
+                # หมายเหตุ: Firestore ปกติ query field เดียว แต่ถ้าจะเอาทั้งสองอาจต้องใช้ OR หรือ query แยก 
+                # ในที่นี้ให้เน้น field "zone" เป็นหลักตามมาตรฐานใหม่
+                query = query.where("zone", "==", zone)
+                
+            query = query.limit(limit)
             results = []
             for doc in query.stream():
                 raw_data = doc.to_dict()

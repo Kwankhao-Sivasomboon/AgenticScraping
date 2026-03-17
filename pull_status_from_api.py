@@ -39,23 +39,32 @@ def run_pull_status():
         print("✅ ไม่พบรายการที่มี api_property_id")
         return
         
-    print(f"🔥 พบเป้าหมายทั้งหมด {len(target_docs)} รายการ")
+    print(f"🔥 พบรายการที่อาจต้องอัปเดต {len(target_docs)} รายการ")
+    
+    # จำกัดจำนวนการรันต่อรอบเพื่อไม่ให้ Server API รับภาระหนักเกินไป (แก้ปัญหา Error 500)
+    MAX_ITEMS_PER_RUN = 100
     
     success_count = 0
     fail_count = 0
-    
-    # Fields ที่เราต้องการจะ Update กลับลงไป
-    fields_to_sync = [
-        "latitude", "longitude", "city", "state", "district", "province", 
-        "subdistrict", "country", "postal_code", "address", "color", "style"
-    ]
+    skip_count = 0
+    processed_count = 0
     
     for i, item in enumerate(target_docs, 1):
+        if processed_count >= MAX_ITEMS_PER_RUN:
+            print(f"\n✋ หยุดทำงานเนื่องจากครบโควต้า {MAX_ITEMS_PER_RUN} รายการแล้ว (ป้องกัน Error 500)")
+            break
+            
         doc_id = item['id']
         property_id = item['api_property_id']
         old_data = item['data']
         
-        print(f"\n[{i}/{len(target_docs)}] 🔄 กำลังดึงข้อมูล Property ID: {property_id} (Firestore ID: {doc_id})")
+        # 🛡️ Logic กันรันซ้ำ: ถ้าใน Firestore มีข้อมูลครบสำคัญแล้ว ให้ข้ามการเรียก API ไปเลย
+        if old_data.get('latitude') and old_data.get('longitude') and old_data.get('address'):
+            skip_count += 1
+            continue
+
+        processed_count += 1
+        print(f"\n[{processed_count}/{MAX_ITEMS_PER_RUN}] 🔄 กำลังดึงข้อมูล Property ID: {property_id} (Firestore ID: {doc_id})")
         
         # ดึงสถานะปัจจุบันจาก API
         api_data = api.get_property_status(property_id)
