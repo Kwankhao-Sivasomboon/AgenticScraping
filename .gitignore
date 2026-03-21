@@ -4,6 +4,8 @@ credentials.json
 playwright_state.json
 GCPPowerShell.txt
 agentic-scraping-pptd-f7bc092f86f3.json
+Property_Color_Analysis_API.postman_collection.json
+Property_Management_APIs.postman_collection.json
 
 # Python
 __pycache__/

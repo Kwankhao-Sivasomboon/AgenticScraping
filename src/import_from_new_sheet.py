@@ -4,6 +4,8 @@ import uuid
 import gspread
 from google.oauth2.service_account import Credentials
 from dotenv import load_dotenv
+from datetime import datetime
+
 
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
@@ -126,8 +128,11 @@ def run_import():
         # สร้างข้อมูลอัปเดต (ดึงแบบไดนามิกตามคอลัมน์ที่มีใน Sheet)
         raw_data_updates = {
             "zone": zone_input,
-            "status": "new_sheet" # บันทึกสถานะตามที่ขอ แทนที่จะปล่อยเป็น active ธรรมดา
+            "status": "new_sheet", # บันทึกสถานะตามที่ขอ แทนที่จะปล่อยเป็น active ธรรมดา
+            "last_imported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "source_sheet": f"{doc.title} ({tab_name})"
         }
+
         
         # วนลูปดึงข้อมูลทุกคอลัมน์ที่มีอยู่ใน Sheet แบบไม่ต้องตั้งชื่อ Fix ไว้ก่อนเลย
         for key, value in row.items():

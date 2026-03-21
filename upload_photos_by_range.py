@@ -101,6 +101,21 @@ def run_upload_photos():
                         print(f"   ⚠️ AI คัดออกหมด → ใช้รูปทั้งหมดแทน")
                         valid_image_urls = image_urls
                     print(f"   ✅ รูปที่ผ่านการคัดกรอง: {len(valid_image_urls)}/{len(image_urls)} รูป")
+                    
+                    # 🔥 บันทึกสีและสไตล์ที่ AI วิเคราะห์ได้ลง Firestore ทันทีเพื่อไม่ให้สูญหาย
+                    if result.color_name or result.style_name:
+                        update_ai_data = {}
+                        if result.color_name and result.color_name not in ["", "-"]:
+                            update_ai_data["color"] = result.color_name
+                            print(f"   🎨 AI พบสี: {result.color_name}")
+                        if result.style_name and result.style_name not in ["", "-"]:
+                            update_ai_data["style"] = result.style_name
+                            print(f"   🛋️ AI พบสไตล์: {result.style_name}")
+                            
+                        if update_ai_data:
+                            firestore.db.collection(firestore.collection_name).document(listing_id).update(update_ai_data)
+                            print(f"   💾 บันทึก สี/สไตล์ ลง Firestore เรียบร้อยแล้ว")
+                
             except Exception as e:
                 print(f"   ⚠️ AI Filtering Error: {e} → ใช้รูปทั้งหมดแทน")
                 valid_image_urls = image_urls

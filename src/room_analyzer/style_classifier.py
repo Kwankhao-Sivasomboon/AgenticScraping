@@ -17,8 +17,8 @@ class PropertyImagesAnalysis(BaseModel):
         populate_by_name=True,
         extra='ignore' # ถ้า AI ตอบเกินมาให้ข้ามไป ไม่ต้อง Error
     )
-    average_color_hex: str = Field(description="HEX code of the overall dominant room color, e.g. #FFFFFF")
-    color_name: str = Field(description="Color name of the overall dominant room color, e.g. White, Beige, Gray")
+    average_color_hex: str = Field(description="HEX code of the overall dominant room color, e.g. #FFFFFF (Left for backward compatibility, you can put any hex here)")
+    color_name: str = Field(description="Color breakdown of the room in Thai, formatted exactly as: 'กำแพงออกโทนเป็นสี... (X%ของภาพทั้งหมด) , ประตูห้องสี...(Y%ของภาพ), เฟอร์นิเจอร์สี...+... (Z%+W% ตามลำดับ)'")
     interior_style: str = Field(description="Interior style: one of Modern, Nordic, Contemporary, Minimalist, Loft, Luxury, Other")
     property_type: str = Field(description="Property type: one of 'condo', 'house', 'unknown' based on structural cues")
     valid_image_indices: List[int] = Field(description="List of integer indices (0-based) of images that show interior rooms. Exclude: maps, floor plans, people, animals, blurry images.")
@@ -113,7 +113,14 @@ def analyze_room_images(image_urls: List[str]) -> Optional[PropertyImagesAnalysi
         "IMPORTANT INSTRUCTIONS:\n"
         "1. Identify valid images. IGNORE and skip any images that show ONLY: floor plans/blueprints, maps (e.g. Google Maps), pure outdoor scenery with no building, swimming pool-only shots, people/animals, or completely blurry images. Images that have watermarks or overlaid text are still VALID if they show an interior or exterior of a property.\n"
         "2. List the 'valid_image_indices' which corresponds to the 'Image Index' labels provided for each image. ONLY include indices of images that are VALID based on the criteria above.\n"
-        "3. From the valid images, extract the Average Dominant Color (HEX) and color_name (e.g., White, Cream, Gray).\n"
+        "3. From the valid images, analyze the colors of the Wall, Door, and Furniture. Provide your breakdown in the 'color_name' field strictly in Thai. The string MUST conform EXACTLY to this structural format:\n"
+        "   'กำแพงออกโทนเป็นสีขาว (60%ของภาพทั้งหมด) , ประตูห้องสีน้ำตาล(20%ของภาพ), เฟอร์นิเจอร์สีดำ+เขียว+ชมพู(5%+5%+10% ตามลำดับ)'\n"
+        "   You MUST ONLY use colors from this predefined list for your descriptions. NEVER use other external color names. DO NOT write the elements (Wood, Fire, etc), ONLY write these colors:\n"
+        "   - สีเขียว, สีน้ำตาล\n"
+        "   - สีแดง, สีเหลืองเข้ม, สีส้ม, สีม่วง, สีชมพู\n"
+        "   - สีเหลืองอ่อน, สีเหลืองปนน้ำตาล, สีน้ำตาลอ่อน\n"
+        "   - สีขาว, สีเทา\n"
+        "   - สีน้ำเงิน, สีดำ\n"
         "4. Categorize the Interior Design Style into EXACTLY ONE of these styles: Modern, Nordic, Contemporary, Minimalist, Loft, Luxury, Other.\n"
         "5. Categorize the property_type as either 'condo', 'house', or 'unknown' based on clues like exterior views, ceiling height, or balconies."
     )
