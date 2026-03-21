@@ -94,12 +94,12 @@ def run_pull_status():
             
         # ดึง color (ใน API คือ house_color)
         color = api_specs.get('house_color')
-        if color and old_data.get('color') != color:
+        if color and color not in ["-", ""] and old_data.get('color') != color:
             update_payload['color'] = color
             
         # ดึง style (ถ้ามีในอนาคต หรือเก็บไว้ก่อน)
         style = api_specs.get('style') # ปัจจุบันใน JSON ยังไม่มี แต่ใส่เผื่อไว้ตาม request
-        if style and old_data.get('style') != style:
+        if style and style not in ["-", ""] and old_data.get('style') != style:
             update_payload['style'] = style
                     
         if update_payload:
