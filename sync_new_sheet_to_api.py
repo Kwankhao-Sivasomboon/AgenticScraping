@@ -1,15 +1,12 @@
-"""
-Script: sync_new_sheet_to_api.py
-Description: อัปเดตข้อมูลที่เป็น status: new_sheet จาก Firestore ไปยัง Agent API
-             โดยเน้นข้อมูลใหม่จาก Google Sheet เป็น First Priority 
-             ประกอบด้วยการ Update Property และ Log Activities (Calls, Accept, Deny)
-"""
 
 import os
 import sys
 import time
+import random
+import re
 from datetime import datetime
 
+# Setup Root Path
 project_root = os.path.dirname(os.path.abspath(__file__))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
@@ -17,395 +14,388 @@ if project_root not in sys.path:
 from src.services.firestore_service import FirestoreService
 from src.services.api_service import APIService
 
-# จำกัดจำนวนเพื่อความปลอดภัย
-MAX_ITEMS_PER_RUN = 1
-
-def clean(text, default=""):
-    if not text or str(text).strip() == "":
-        return default
-    return str(text).strip()
+def clean(val, default="-"):
+    if val is None: return default
+    s = str(val).strip()
+    return s if s and s != "nan" and s != "None" else default
 
 def parse_float(val):
-    if not val or str(val).strip() in ["-", ""]: return None
-    v_str = str(val).replace(',', '').strip()
+    if val is None: return None
     try:
-        return float(v_str)
-    except ValueError:
-        return None
+        s = str(val).replace("฿", "").replace(",", "").strip()
+        m = re.search(r'(\d+(\.\d+)?)', s)
+        return float(m.group(1)) if m else None
+    except: return None
 
-def parse_beds_baths(val):
-    if not val or str(val).strip() in ["-", ""]: return None
+def get_smart(data, search_terms, default="-"):
+    for k, v in data.items():
+        # แก้บัก: ตัด term ว่างเปล่าออกเพื่อป้องกันการ match ทุก key
+        # (ห้ามมี "" ใน search_terms หรือ k จะ match เสมอ)
+        if any(term and (term in k) for term in search_terms):
+            res = clean(v)
+            if res != "-": return res
+    return default
+
+def get_price_smart(data, search_terms):
+    for k, v in data.items():
+        if any(term and (term in k) for term in search_terms):
+            val = parse_float(v)
+            if val: return val
+    return 0
+
+def parse_beds_baths(val, mode="bed"):
+    if val is None: return None
     try:
-        num = int(float(str(val).strip()))
-        if num == 13: return None
-        if num == 14: return 1
-        return num
-    except ValueError:
-        return None
+        s = str(val).strip().lower()
+        if any(x in s for x in ["studio", "สตูดิโอ", "13", "14"]): return 0
+        if mode == "bed":
+            m = re.search(r'(\d+)\s*(br|bed|bedroom|นอน)', s)
+            if m: return int(m.group(1))
+        else:
+            m = re.search(r'(\d+)\s*(bt|bath|bathroom|น้ำ)', s)
+            if m: return int(m.group(1))
+        m = re.search(r'(\d+)', s)
+        return int(m.group(1)) if m else None
+    except: return None
 
-def run_sync_new_sheet():
-    print(f"🚀 เริ่มต้นกระบวนการ Sync ข้อมูล 'new_sheet' ไปยัง Agent API...")
+def parse_floor(val):
+    if val is None: return "1"
+    s = str(val).strip()
+    # พยายามดึงตัวเลขล้วนๆ ออกมา (เช่น "ชั้น 28" -> "28")
+    m = re.search(r'(\d+)', s)
+    if m: return m.group(1)
+    return s if s and s != "-" else "1"
+
+import urllib.request
+import urllib.parse
+import json
+
+_name_cache = {}
+
+def format_project_name_th_en(name):
+    """
+    Format and translate project name.
+    If mainly Thai -> Translate to EN -> returns 'English Name ( Thai Name )'
+    If mainly English -> Translate to TH -> returns 'English Name ( Thai Name )'
+    If both exist -> return as is.
+    """
+    name = str(name).strip()
+    if not name or name == "-":
+        return name
+        
+    if name in _name_cache:
+        return _name_cache[name]
+        
+    has_en = bool(re.search(r'[A-Za-z]', name))
+    has_th = bool(re.search(r'[\u0E00-\u0E7F]', name))
     
-    firestore = FirestoreService()
+    if has_en and has_th:
+        _name_cache[name] = name
+        return name
+        
+    try:
+        # มีไทยแต่ไม่มีอังกฤษ -> แปลเป็นอังกฤษ
+        if has_th and not has_en:
+            safe_text = urllib.parse.quote(name)
+            url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=th&tl=en&dt=t&q={safe_text}"
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            res = urllib.request.urlopen(req, timeout=5)
+            data = json.loads(res.read().decode('utf-8'))
+            en_name = ''.join([sentence[0] for sentence in data[0]]).title()
+            if en_name.lower() != name.lower() and re.search(r'[A-Za-z]', en_name):
+                formatted = f"{en_name} ( {name} )"
+                _name_cache[name] = formatted
+                return formatted
+                
+        # มีอักฤษแต่ไม่มีไทย -> แปลเป็นไทย
+        elif has_en and not has_th:
+            safe_text = urllib.parse.quote(name)
+            url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=th&dt=t&q={safe_text}"
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            res = urllib.request.urlopen(req, timeout=5)
+            data = json.loads(res.read().decode('utf-8'))
+            th_name = ''.join([sentence[0] for sentence in data[0]])
+            if th_name != name and re.search(r'[\u0E00-\u0E7F]', th_name):
+                formatted = f"{name} ( {th_name} )"
+                _name_cache[name] = formatted
+                return formatted
+    except Exception as e:
+        print(f"      🕵️‍♂️ [Translate Warn] Failed to translate '{name}': {e}")
+        pass
+        
+    _name_cache[name] = name
+    return name
+
+def get_dominant_color(room_color, element_color):
+    """คำนวณหาสีที่ % รวมสูงสุด (Dominant) และคืนค่าภาษาอังกฤษ (12 Colors Edition)"""
+    english_colors = [
+        "Green", "Brown", "Red", "Gold", "Orange", "Purple", "Pink", 
+        "Yellow", "Gold", "Brown", "White", "Gray", "Blue", "Black"
+    ]
+    try:
+        if not room_color or not element_color: return "-"
+        combined = [r + e for r, e in zip(room_color, element_color)]
+        max_idx = combined.index(max(combined))
+        return english_colors[max_idx]
+    except: return "-"
+
+def run_sync_new_sheet(target_arg=None):
+    fs = FirestoreService()
     api = APIService()
+    mode = "default"
+    start_id, end_id, limit_count = None, None, 0
     
-    if not firestore.db:
-        print("❌ เชื่อมต่อ Firestore ไม่สำเร็จ")
-        return
-        
-    if not api.authenticate():
-        print("❌ Login Agent API ล้มเหลว! ยกเลิกการ Sync")
-        return
+    if target_arg:
+        arg_lower = str(target_arg).lower()
+        if arg_lower == "all": mode = "all"
+        elif arg_lower == "nolatlng": mode = "nolatlng"
+        elif arg_lower == "unsynced": mode = "unsynced"
+        elif arg_lower == "limit" and len(sys.argv) > 2:
+            mode = "limit"
+            limit_count = int(sys.argv[2])
+        elif len(sys.argv) > 2:
+            mode = "range"
+            start_id, end_id = int(sys.argv[1]), int(sys.argv[2])
+        else: mode = "single"
 
-    print("📦 กำลังค้นหาข้อมูลใน Firestore ที่มี status = 'new_sheet'...")
-    # Firestore ไม่รองรับ 'not starts with' ดึงมาก่อนแล้ว Filter เอง
-    # ใช้ buffer ขนาดใหญ่พอเพื่อกันกรณีที่มี ImportSheet เยอะ
-    query_limit = MAX_ITEMS_PER_RUN + 200
-    query = firestore.db.collection(firestore.collection_name).where("status", "==", "new_sheet").limit(query_limit)
-    docs = query.stream()
+    print(f"🚀 เริ่มต้นการ Sync ข้อมูล (Mode: {mode}, Target: {target_arg})...")
+    if not api.authenticate(): return
 
-    items_to_sync = []
-    import_sheet_skipped = 0
-    for doc in docs:
-        listing_id = doc.id
-        # กรอง ImportSheet ออกตั้งแต่ตอนโหลด
-        if listing_id.startswith("ImportSheet"):
-            import_sheet_skipped += 1
-            continue
-        
-        raw_data = doc.to_dict()
-        
-        # กรองทรัพย์ประเภท "อื่นๆ" ออก (เช่น ที่ดิน, โกดัง ที่ไม่ได้รองรับ)
-        property_type_sheet = clean(raw_data.get("sheet_ประเภททรัพย์"))
-        if property_type_sheet == "อื่นๆ":
-            # เปลี่ยนสถานะใน Firestore เป็น ignored เพื่อไม่ให้ query ติดซ้ำๆ (ถ้าต้องการ) หรือแค่ข้ามไป
-            # firestore.db.collection(firestore.collection_name).document(listing_id).update({"status": "ignored"})
-            print(f"   ⏭️ ข้าม Listing {listing_id} (ประเภททรัพย์: อื่นๆ)")
-            continue
+    # --- FETCH LOGIC ---
+    if mode == "single":
+        query = fs.db.collection(fs.collection_name).where("api_property_id", "in", [int(target_arg), str(target_arg)]).limit(1).get()
+        target_items = list(query) if query else [fs.db.collection(fs.collection_name).document(target_arg).get()]
+    elif mode == "unsynced":
+        print("🔍 Scanning Firestore specifically for UNSYNCED items (Retry Mode)...")
+        # 🎯 กรองเอาตัวที่ยังไม่สำเร็จ และไม่ใช่รายการที่โดน Approve แล้ว
+        all_stream = fs.db.collection(fs.collection_name).stream()
+        target_items = []
+        for d in all_stream:
+            data = d.to_dict()
+            is_synced = data.get("api_synced", False)
+            # 🛡️ เช็คความชัวร์: ต้องยังไม่ซิงค์ และต้องไม่มีธง "Approved" ปักอยู่
+            is_approved = data.get("is_approved") or data.get("approved") or (data.get("status") == "approved")
+            
+            lat = str(data.get("latitude", "0")).strip()
+            # 📍 เงื่อนไข 'unsynced' คือมีพิกัดแล้ว (ไม่ใช่ 0) แต่ยังซิงค์ไม่สำเร็จ
+            has_latlng = lat and lat not in ["0", "-", "0.0"]
 
-        # ดึง ai_analysis จาก subcollection เผื่อต้องใช้ข้อมูล fallback
-        analysis_doc = doc.reference.collection('Analysis_Results').document('evaluation').get()
-        ai_evaluation = analysis_doc.to_dict() if analysis_doc.exists else {}
-        
-        items_to_sync.append({
-            'listing_id': listing_id,
-            'raw_data': raw_data,
-            'ai_evaluation': ai_evaluation
-        })
-        
-        if len(items_to_sync) >= MAX_ITEMS_PER_RUN:
-            break
+            if not is_synced and not is_approved and has_latlng:
+                target_items.append(d)
+        print(f"🎯 พบรายการที่ยังซิงค์ไม่จบและพร้อมลุยต่อ: {len(target_items)} รายการ")
+    elif mode == "limit":
+        print(f"🔬 Searching and Sorting ALL properties for LIMIT {limit_count}...")
+        all_docs = list(fs.db.collection(fs.collection_name).stream())
+        all_docs.sort(key=lambda x: int(x.to_dict().get("api_property_id") or 999999))
+        target_items = all_docs[:limit_count]
+        print(f"📊 Total properties in Store: {len(all_docs)} | Processing first {len(target_items)} by ID...")
+    elif mode == "nolatlng":
+        print("🧭 โหมดพิเศษ: คืนความสว่างให้รายการที่ไร้พิกัด...")
+        all_stream = fs.db.collection(fs.collection_name).stream()
+        target_items = []
+        for d in all_stream:
+            data = d.to_dict()
+            lat = str(data.get("latitude", "0")).strip()
+            lng = str(data.get("longitude", "0")).strip()
+            if not lat or not lng or lat in ["0", "-", "0.0"] or lng in ["0", "-", "0.0"]:
+                target_items.append(d)
+        print(f"🎯 พบรายการที่ขาดพิกัดทั้งหมด: {len(target_items)} รายการ")
+    elif mode == "all":
+        print("🌍 Fetching ALL properties from Firestore...")
+        target_items = list(fs.db.collection(fs.collection_name).stream())
+        target_items.sort(key=lambda x: int(x.to_dict().get("api_property_id") or 999999))
+    elif mode == "range":
+        all_stream = fs.db.collection(fs.collection_name).stream()
+        target_items = [doc for doc in all_stream if start_id <= int(doc.to_dict().get("api_property_id", 0)) <= end_id]
+        target_items.sort(key=lambda x: int(x.to_dict().get("api_property_id") or 999999))
+    else:
+        query = fs.db.collection(fs.collection_name).where("is_new_sheet", "==", True).get()
+        target_items = list(query)
+        target_items.sort(key=lambda x: int(x.to_dict().get("api_property_id") or 999999))
 
-    if import_sheet_skipped > 0:
-        print(f"   ⏭️ ข้ามรายการ ImportSheet: {import_sheet_skipped} รายการ")
+    success_count, fail_count, skipped_count = 0, 0, 0
 
-    if not items_to_sync:
-        print("✅ ไม่พบข้อมูล new_sheet ที่รอการ Sync (นอกจาก ImportSheet)")
-        return
-
-    print(f"🔥 พบ {len(items_to_sync)} รายการที่รอการอัปเดต...")
-
-    success_count = 0
-    fail_count = 0
-
-    for item in items_to_sync:
-        listing_id = item['listing_id']
-        raw_data = item['raw_data']
-        ai_evaluation = item.get('ai_evaluation', {})
-        
-        print(f"\n======================================")
-        print(f"🔄 กำลังประมวลผล Listing ID: {listing_id}")
-
-        # === เตรียมคำนวณ Field ===
-        
-        # 1. Status (sheet_อยู่ไหม)
-        sheet_still_there = clean(raw_data.get("sheet_อยู่ไหม"))
-        status_val = "available"
-        if sheet_still_there == "ยังอยู่":
-            status_val = "available"
-        elif sheet_still_there == "ปล่อยแล้ว":
-            status_val = "sold"
-        elif sheet_still_there in ["ไม่ทราบ", "ติดผู้เช่า"]:
-            status_val = "unavailable"
-
-        # 2. Reference URL (sheet_ลิงค์/url)
-        sheet_url = clean(raw_data.get("sheet_ลิงค์/url"))
-        reference_url = sheet_url if sheet_url and sheet_url != "-" else None
-
-        # 3. Property Visit (sheet_เข้าดูห้อง, sheet_สแกน)
-        sheet_visit = clean(raw_data.get("sheet_เข้าดูห้อง"))
-        sheet_scan = clean(raw_data.get("sheet_สแกน"))
-        
-        property_visit = None
-        if sheet_visit == "อนุญาตให้เข้า":
-            if sheet_scan == "อนุญาต":
-                property_visit = "Visit&Scan"
-            elif sheet_scan == "ไม่สะดวก":
-                property_visit = "Visit"
-        elif sheet_visit == "ไม่สะดวก":
-            property_visit = "Deny"
-
-        # 4. Sizes (sheet_Area (M), sheet_Area (W))
-        b_size = parse_float(raw_data.get("sheet_Area (M)"))
-        l_size = parse_float(raw_data.get("sheet_Area (W)"))
-        
-        if b_size is None and l_size is None:
-            # Fallback จาก ai_evaluation
-            legacy_size = parse_float(ai_evaluation.get("size"))
-            selected_type = clean(raw_data.get("sheet_ประเภททรัพย์"))
-            if legacy_size:
-                if "คอนโด" in selected_type or selected_type == "condo":
-                    b_size = legacy_size
-                else:
-                    l_size = legacy_size
-                    
-        final_area = b_size if b_size is not None else (l_size if l_size is not None else 0)
-
-        # 5. Beds / Baths (13 -> null, 14 -> 1)
-        bedrooms = parse_beds_baths(raw_data.get("sheet_Bed"))
-        if bedrooms is None: bedrooms = parse_beds_baths(ai_evaluation.get("bedrooms"))
-        if bedrooms is None: bedrooms = 0  # ต้องไม่เป็น None เพื่อผ่าน API Validation
-        
-        bathrooms = parse_beds_baths(raw_data.get("sheet_Bath"))
-        if bathrooms is None: bathrooms = parse_beds_baths(ai_evaluation.get("bathrooms"))
-        if bathrooms is None: bathrooms = 0  # ต้องไม่เป็น None เพื่อผ่าน API Validation
-
-        # --- Base Data Fallbacks ---
-        zone_name_fallback = firestore.collection_name.replace("Properties_", "")
-        zone_name = clean(raw_data.get("zone")) or clean(raw_data.get("Zone")) or zone_name_fallback
-        
-        selected_type = clean(raw_data.get("sheet_ประเภททรัพย์"), "condo")
-        prop_type = "condo" if "คอนโด" in selected_type or selected_type == "condo" else "house"
-        
-        final_number = clean(raw_data.get("sheet_เลขที่ห้อง") or ai_evaluation.get("house_number"), "-")
-        final_phone = clean(raw_data.get("sheet_เบอร์โทรเจ้าของ") or ai_evaluation.get("phone_number"), "0")
-        final_owner = clean(raw_data.get("sheet_ชื่อเจ้าของ") or ai_evaluation.get("customer_name"), "-")
-        
-        # ดึงราคา (รองรับทั้งชื่อภาษาไทยและอังกฤษจาก Sheet)
-        rent_raw = raw_data.get("sheet_ราคาเช่า") or raw_data.get("sheet_Price  (Rent)") or ai_evaluation.get("rental_price")
-        sell_raw = raw_data.get("sheet_ราคาขาย") or raw_data.get("sheet_Price (Sell)") or ai_evaluation.get("sell_price")
-
-        # ฟังก์ชันช่วยล้าง ฿ และ , ออกก่อแปลงเลข
-        def clean_price(val):
-            if not val: return "0"
-            return str(val).replace("฿", "").replace(",", "").strip()
-
-        rent_price = parse_float(clean_price(rent_raw)) or 0
-        sell_price = parse_float(clean_price(sell_raw)) or 0
-
-        address = clean(raw_data.get("address")) or clean(ai_evaluation.get("address")) or "-"
-        
-        # --- กำหนด Payload ตรงตาม Postman ล่าสุด ---
-        payload = {
-            "property_initial_owner": final_owner,
-            "property_initial_owner_mobile_number": final_phone,
-            "building_size": b_size,
-            "land_size": l_size,
-            "built": datetime.now().strftime("%Y-%m-%d"),
-            "name": clean(ai_evaluation.get("project_name"), "-"),
-            "type": prop_type,
-            "status": status_val, 
-            "price": sell_price,
-            "monthly_rental_price": rent_price,
-            "description": "-",
-            "address": address,
-            "number": final_number, 
-            "city": clean(raw_data.get("city"), zone_name),
-            "state": clean(raw_data.get("state"), "กรุงเทพมหานคร"),
-            "district": clean(raw_data.get("city"), zone_name),
-            "province": clean(raw_data.get("state"), "กรุงเทพมหานคร"),
-            "subdistrict": clean(raw_data.get("subdistrict"), "-"),
-            "country": clean(raw_data.get("country"), "Thailand"),
-            "postal_code": clean(raw_data.get("postal_code"), "-"),
-            "house_color": clean(raw_data.get("color"), "-"),
-            "bedrooms": bedrooms,
-            "bathrooms": bathrooms,
-            "garage": 0,
-            "reference_url": reference_url,
-            "property_visit": property_visit
-        }
-        # ใส่ latitude/longitude เฉพาะตอนมีค่า
-        # ถ้าไม่มีค่า หรือ city, state เป็น "-" → ให้เรียก Maps API โดยอัตโนมัติ
-        lat_val = parse_float(raw_data.get("latitude"))
-        lng_val = parse_float(raw_data.get("longitude"))
-
-        if lat_val is None or lng_val is None or payload["city"] == "-" or payload["state"] == "-":
-            project_name_for_map = clean(ai_evaluation.get("project_name")) or clean(raw_data.get("name"))
-            if project_name_for_map and project_name_for_map != "-":
-                print(f"   🗺️ ไม่มีพิกัด/ที่อยู่ → เรียก Maps API ด้วยชื่อ: '{project_name_for_map}'")
-                from src.services.maps_service import get_location_details
-                map_result = get_location_details(project_name_for_map)
-                if map_result:
-                    lat_val = parse_float(map_result.get("latitude")) if lat_val is None else lat_val
-                    lng_val = parse_float(map_result.get("longitude")) if lng_val is None else lng_val
-                    # ถ้า payload ยังไม่มีที่อยู่ ให้ใช้จาก Maps ด้วย
-                    if payload["address"] == "-":
-                        payload["address"] = map_result.get("address", "-")
-                    if payload["city"] == "-" or payload["city"] == zone_name:
-                        payload["city"] = map_result.get("city", zone_name)
-                        payload["district"] = map_result.get("city", zone_name)
-                    if payload["state"] == "-" or payload["state"] == "กรุงเทพมหานคร":
-                        payload["state"] = map_result.get("state", "กรุงเทพมหานคร")
-                        payload["province"] = map_result.get("state", "กรุงเทพมหานคร")
-                    if payload["subdistrict"] == "-":
-                        payload["subdistrict"] = map_result.get("sub_district", "-")
-                    if payload["postal_code"] == "-":
-                        payload["postal_code"] = map_result.get("postal_code", "-")
-                    print(f"   ✅ Maps API ได้พิกัดและที่อยู่ใหม่")
-            else:
-                print(f"   ⚠️ ไม่มีข้อมูลพิกัดและไม่มีชื่อโครงการ → ข้ามการเรียก Maps API")
-
-        if lat_val is not None: payload["latitude"] = lat_val
-        if lng_val is not None: payload["longitude"] = lng_val
-
-        # ก่อนส่ง API ต้องบังคับให้ field สำคัญไม่เป็นค่าว่าง ("") เด็ดขาด
-        for key in ["city", "state", "district", "province", "subdistrict", "postal_code", "address", "name"]:
-            if not payload.get(key) or str(payload.get(key)).strip() == "":
-                payload[key] = "-"
-
+    for doc in target_items:
+        if not doc.exists: continue
+        listing_id, raw_data = doc.id, doc.to_dict()
         property_id = raw_data.get("api_property_id")
         
-        if property_id:
-            # Update Existing
-            print(f"🏠 [API] Updating property {property_id}...")
-            # ดึง response มาตรวจสอบเผื่อพังเพราะ 403
-            try:
-                api_success = api.update_property(property_id, payload)
-            except Exception as e:
-                # ถ้าพังเพราะ 403 (Forbidden) แสดงว่าไม่ใช่ของเจ้าของนี้ ให้ลอง Create ใหม่แทน
-                if hasattr(e, 'response') and e.response is not None and e.response.status_code == 403:
-                    print(f"   ⚠️ ติด 403 (No Access) → ลอง Create ใหม่แทน...")
-                    property_id = api.create_property(payload)
-                    api_success = True if property_id else False
-                else:
-                    api_success = False
+        analysis_doc = fs.db.collection(fs.collection_name).document(listing_id).collection('Analysis_Results').document('evaluation').get()
+        ai_evaluation = analysis_doc.to_dict() if analysis_doc.exists else {}
+
+        # 1. Sizes & Type
+        b_size = parse_float(raw_data.get("sheet_Area (M)") or raw_data.get("sheet_Area (Sq.m)"))
+        l_size = parse_float(raw_data.get("sheet_Area (W)") or raw_data.get("sheet_Area (Sq.w)"))
+        raw_type_thai = clean(raw_data.get("sheet_ประเภททรัพย์")).lower()
+        if "คอนโด" in raw_type_thai: prop_type = "condo"
+        elif any(x in raw_type_thai for x in ["บ้าน", "ทาวน์", "house", "villa"]): prop_type = "house"
+        else: prop_type = "condo" if b_size and not l_size else "house"
+        final_l_size = 0 if prop_type == "condo" else (l_size or 0)
+
+        # 2. Smart Address & Name
+        addr_sheet = get_smart(raw_data, ["Address (API)", "ที่อยู่"])
+        addr_raw = clean(raw_data.get("address"))
+        addr_ai = clean(ai_evaluation.get("address"))
+        p_name = get_smart(raw_data, ["โครงการ", "ชื่อโครงการ"])
+        if p_name == "-": p_name = clean(ai_evaluation.get("project_name"))
+        
+        # 🌐 [NEW] ฟอร์แมตชื่อโปรเจกต์ (แปลไทย-อังกฤษอัตโนมัติ)
+        p_name = format_project_name_th_en(p_name)
+        
+        zone_v = clean(raw_data.get("zone", "-"))
+        
+        # กรองคำที่ไม่ใช่ชื่อโซนจริงๆ ออกไป
+        if zone_v in ["all", "unsynced"]: zone_v = "-"
+
+        # ประกอบ Address หลัก: Sheet > Raw > AI > Project Name
+        base_address = addr_sheet if addr_sheet != "-" else (addr_raw if addr_raw != "-" else (addr_ai if addr_ai != "-" else p_name))
+        
+        # 🌐 [NEW] เติม 'โซน' เข้าไปหน้า Address เพื่อให้ใน agent_api ค้นหาง่ายและสื่อสารชัดเจน
+        if zone_v != "-" and zone_v.lower() not in base_address.lower():
+            final_address = f"โซน {zone_v} - {base_address}"
         else:
-            # Create New
-            print(f"🏠 [API] Creating new property...")
-            property_id = api.create_property(payload)
-            api_success = True if property_id else False
+            final_address = base_address
 
-        if not api_success or not property_id:
-            print(f"❌ Failed to sync Property (Create/Update failed).")
-            fail_count += 1
-            continue
-            
-        # ถ้า Create ใหม่สำเร็จ ให้เซฟ Property ID ลง Firestore เผื่อไว้ใช้ด้วย
-        if not raw_data.get("api_property_id"):
-            firestore.db.collection(firestore.collection_name).document(listing_id).update({"api_property_id": property_id})
+        # 3. Beds/Baths
+        ut_raw = get_smart(raw_data, ["Unit Type"])
+        beds = parse_beds_baths(ut_raw, "bed") or parse_beds_baths(raw_data.get("sheet_Bed"), "bed") or parse_beds_baths(ai_evaluation.get("bedrooms") or (ai_evaluation.get("specifications") or {}).get("bedrooms"), "bed")
+        baths = parse_beds_baths(ut_raw, "bath") or parse_beds_baths(raw_data.get("sheet_Bath"), "bath") or parse_beds_baths(ai_evaluation.get("bathrooms") or (ai_evaluation.get("specifications") or {}).get("bathrooms"), "bath")
 
-        # ==========================================
-        # 6. สร้าง Activity (Call, Accept, Deny)
-        # ==========================================
-        sheet_call_status = clean(raw_data.get("sheet_สถานะการโทร"))
-        sheet_market_status = clean(raw_data.get("sheet_ขอทำการตลาด"))
-        sheet_contact_latest = clean(raw_data.get("sheet_ติดต่อล่าสุด"))
-        sheet_feedback = clean(raw_data.get("sheet_Feedback"))
-        sheet_remark = clean(raw_data.get("sheet_Remark"))
+        # 4. Pricing & Sale Type
+        sor_raw = get_smart(raw_data, ["S or R", "ประเภทการขาย"]).lower()
+        sale_type = "sale_or_rent" if any(x in sor_raw for x in ["s/r", "sr", "ขาย/เช่า"]) else ("sale" if any(x in sor_raw for x in ["s", "sell", "sale", "ขาย"]) else ("rent" if any(x in sor_raw for x in ["r", "rent", "เช่า"]) else None))
+        sell_p = parse_float(raw_data.get("sheet_ราคาขาย")) or get_price_smart(raw_data, ["ราคาขาย", "Sell", "Price", "Price (Sell)"]) or parse_float(ai_evaluation.get("sell_price") or ai_evaluation.get("price_sell")) or 0
+        rent_p = parse_float(raw_data.get("sheet_ราคาเช่า")) or get_price_smart(raw_data, ["ราคาเช่า", "Rent"]) or parse_float(ai_evaluation.get("rental_price") or ai_evaluation.get("rent_price")) or 0
+        if not sale_type: sale_type = "sale_or_rent" if (sell_p and rent_p) else ("rent" if rent_p else "sale")
 
-        activities = []
+        # 5. House Color & Floor
+        h_color = get_dominant_color(raw_data.get("room_color") or ai_evaluation.get("room_color"), raw_data.get("element_color") or ai_evaluation.get("element_color"))
+        floor_raw = get_smart(raw_data, ["ชั้น", "Floor"])
+        floor_v = parse_floor(floor_raw) # [FIXED] ใช้ parse_floor กรองให้เหลือแค่ตัวเลข
+        if floor_v == "1" and ai_evaluation.get("floor"):
+             floor_v = parse_floor(ai_evaluation.get("floor"))
+
+        # 6. Payload
+        # [NEW] จัดการ City (เขต/อำเภอ) ให้ตรงตามโซนใน Sheet
+        # ถ้าไม่มีโซนใน Sheet (หรือเป็น all/-) ให้ใช้ City จาก Google Maps (Fallback)
+        final_city = zone_v if zone_v != "-" else ""
         
-        def parse_date_to_ymd(date_str):
-            if not date_str or date_str == "-": return None
-            # ล้าง string เผื่อมี space หน้า/หลัง
-            ds = str(date_str).strip()
-            # อาจจะมีเวลาติดมา ให้ตัดทิ้ง ลองใช้ regex หรือ split
-            ds = ds.split(" ")[0].split("T")[0] 
+        payload = {
+            "property_initial_owner": clean(raw_data.get("sheet_ชื่อเจ้าของ") or ai_evaluation.get("owner_name"), "-"),
+            "property_initial_owner_mobile_number": clean(raw_data.get("sheet_เบอร์โทรเจ้าของ") or ai_evaluation.get("extracted_phone"), "0"),
+            "building_size": b_size or 0, "land_size": final_l_size, "built": datetime.now().strftime("%Y-%m-%d"),
+            "name": p_name, "type": prop_type, "sale_type": sale_type, "status": "available", "price": sell_p, "monthly_rental_price": rent_p,
+            "address": final_address, "latitude": parse_float(raw_data.get("latitude") or ai_evaluation.get("latitude")), "longitude": parse_float(raw_data.get("longitude") or ai_evaluation.get("longitude")),
+            "city": final_city, # 🏙️ เพิ่มฟีลด์ City (เขต/อำเภอ) ลงไปในพุง Payload
+            "house_color": h_color, "bedrooms": beds or 0, "bathrooms": baths or 0,
+            "garage": parse_float(ai_evaluation.get("parking_count") or (ai_evaluation.get("specifications") or {}).get("parking_spaces")) or 0
+        }
+        
+        # 7. Specs
+        style_v = clean(raw_data.get("architect_style") or raw_data.get("interior_style") or ai_evaluation.get("interior_style"))
+        payload["specifications"] = {
+            "floor": str(floor_v),      # ส่งทั้งแบบเอกพจน์
+            "floors": str(floor_v),     # และพหูพจน์ เพื่อความชัวร์
+            "bedrooms": str(beds or 0),
+            "bathrooms": str(baths or 0),
+            "parking_spaces": str(int(payload["garage"])),
+            "style": style_v if style_v != "-" else "Other",
+            "interior_style": style_v if style_v != "-" else "Other", # ส่ง interior_style ควบไปด้วย
+            "architect_style": style_v if style_v != "-" else "Other" # ส่ง architect_style ควบไปด้วย
+        }
+        payload["specification_values"] = {"common_facilities": ai_evaluation.get("common_facilities", ["-"])}
 
-            # ไล่ตรวจสอบ Format ยอดฮิตที่อาจจะเจอ
-            formats = [
-                "%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y",
-                "%d-%m-%Y", "%m-%d-%Y", "%d/%m/%y", "%m/%d/%y"
-            ]
-            for fmt in formats:
-                try:
-                    dt = datetime.strptime(ds, fmt)
-                    # ถ้าเจอ format ที่รอด ให้ return เป็น YYYY-MM-DD ตามที่ Postman บังคับ
-                    return dt.strftime("%Y-%m-%d")
-                except ValueError:
-                    pass
-            # คืน None หากแปลงไม่ได้ จะได้ไม่เสี่ยงร่วงตอน API ส่ง 500
-            return None
-
-        # --- 6.1 Call Activity ---
-        call_outcome = None
-        call_notes_parts = []
-        if sheet_feedback and sheet_feedback != "-": call_notes_parts.append(f"Feedback: {sheet_feedback}")
-        if sheet_remark and sheet_remark != "-": call_notes_parts.append(f"Remark: {sheet_remark}")
-        notes_str = "\n".join(call_notes_parts)
-
-        # Mapping โทษการโทร
-        if sheet_call_status == "ติดต่อแล้ว":
-            call_outcome = "reached"
-        elif sheet_call_status == "ไม่รับสาย":
-            call_outcome = "no_answer"
-        elif sheet_call_status == "ให้โทรกลับ":
-            call_outcome = "callback_later"
-        elif sheet_call_status == "ติดต่อไม่ได้":
-            call_outcome = "wrong_number"
-        elif sheet_call_status.lower() == "line":
-            call_outcome = "other"
-            notes_str = f"Line | {notes_str}".strip()
-
-        # กรณี "โทรติด AGENT" สามารถ Override ลงไปได้
-        if sheet_market_status == "โทรติด AGENT":
-            call_outcome = "other"
-            notes_str = f"โทรติด AGENT | {notes_str}".strip()
-
-        notes_str = notes_str.replace("\n", " | ")
-
-        if call_outcome:
-            call_payload = {
-                "type": "call",
-                "call_outcome": call_outcome
-            }
-            # Clean notes: จำกัดความยาวและตัดอักขระแปลกๆ
-            if notes_str: 
-                call_payload["notes"] = notes_str[:500] 
+        if not payload["latitude"] or not payload["longitude"] or payload["latitude"] == "0" or payload["longitude"] == "0":
+            print(f"🕵️‍♂️ Missing Lat/Lng for '{payload['name']}'. Attempting Google Maps Lookup...")
+            from src.services.maps_service import get_location_details
             
-            # ดึงกำหนดติดตามผลครั้งต่อไป (Next Follow Up At)
-            formatted_date = parse_date_to_ymd(sheet_contact_latest)
-            if formatted_date:
-                call_payload["next_follow_up_at"] = formatted_date
+            # ลองใช้ชื่อโครงการ หรือ ที่อยู่ หาพิกัด
+            search_query = payload["name"] if payload["name"] != "-" else payload["address"]
+            map_info = get_location_details(search_query)
+            
+            if map_info and map_info.get("latitude"):
+                payload["latitude"] = map_info["latitude"]
+                payload["longitude"] = map_info["longitude"]
                 
-            activities.append(call_payload)
+                if payload["address"] == "-": 
+                    payload["address"] = map_info["address"]
+                
+                # 🏙️ [FALLBACK] ถ้า City ยังว่างอยู่จนถึงตอนนี้ (เพราะระบุโซนไม่ได้) ให้ดึงจาก Google Maps
+                if not payload.get("city") and map_info.get("city"):
+                    payload["city"] = map_info["city"]
+                    print(f"   🏙️ Found City from Google: {payload['city']}")
+                
+                # 🛠️ [SAVE BACK] บันทึกพิกัดใหม่กลับลง Firestore ทันที (ฟิลด์แท้)
+                fs.db.collection(fs.collection_name).document(listing_id).update({
+                    "latitude": payload["latitude"],
+                    "longitude": payload["longitude"]
+                })
+                print(f"   ✅ Foundry: {payload['latitude']}, {payload['longitude']} (Saved to Firestore)")
+                
+                # --- [NEW] พักหายใจ 1 วิ ก่อนจะไปลุยยิง API ต่อยอด ---
+                time.sleep(1.0)
+            else:
+                print(f"⚠️ Skip {listing_id}: No Lat/Lng found even after Maps lookup")
+                skipped_count += 1
+                continue
 
-        # --- 6.2 Accept/Deny Activity ---
-        if sheet_market_status in ["อนุญาต", "ติดผู้เช่า"]:
-            activities.append({
-                "type": "accept",
-                "reason": "Owner agreed to agent representation."
-            })
-        elif sheet_market_status in ["ไม่สะดวก", "โทรติด AGENT", "ติดต่อไม่ได้"]:
-            activities.append({
-                "type": "deny",
-                "reason": "Owner decided to list without agent."
-            })
-
-        # Submit Activities
-        print(f"   ℹ️ จำนวน Activity ที่จะถูกส่ง: {len(activities)} รายการ")
-        if len(activities) > 0:
-            import time
-            time.sleep(1) # เพิ่ม Delay เพื่อป้องกัน DB หลังบ้าน Transaction หลุด (Race Condition)
+        api_success = False
+        if property_id:
+            # 🕵️‍♂️ [API Direct Check] เช็คสถานะจริงจาก API ก่อนยิงทับ
+            p_status_info = api.get_property_status(property_id)
+            if p_status_info:
+                # 🛡️ พยายามดึง approval_status ออกมาอย่างปลอดภัย (รองรับทั้ง Dict และ String)
+                app_status = ""
+                if isinstance(p_status_info, dict):
+                    app_status = str(p_status_info.get("approval_status", "")).lower()
+                elif isinstance(p_status_info, str):
+                    app_status = p_status_info.lower()
+                    
+                if "approve" in app_status:
+                    print(f"   ⏭️ Skip {property_id}: Already Approved on API (Status: {app_status})")
+                    skipped_count += 1
+                    # ไม่บันทึก 'approved' กลับ Firestore ตามที่บอสสั่ง
+                    continue
             
-        for act_payload in activities:
-            print(f"   ► ส่ง Activity: {act_payload}")
-            api.create_activity(property_id, act_payload)
+            api_success = api.update_property(property_id, payload)
+        else:
+            new_id = api.create_property(payload)
+            if new_id: property_id = new_id; fs.db.collection(fs.collection_name).document(listing_id).update({"api_property_id": property_id}); api_success = True
 
-        # Update status completed
-        # เราตั้งสถานะให้ api_synced = True หรือจะเปลี่ยน status ด้วยก็ได้
-        firestore.db.collection(firestore.collection_name).document(listing_id).update({
-            "api_synced": True,
-            # บางทีอาจจะอยากให้แก้ไข field 'status' กลับเป็นอย่างอื่น ถ้าต้องการลบสถานะ new_sheet
-            # "status": "processed" 
-        })
+        if api_success:
+            print(f"✅ Sync {property_id} Success (Color: {h_color}, Floor: {floor_v})")
+            success_count += 1
+            
+            # --- [NEW] 1. บันทึก 'color' กลับไปใน Leads (เฉพาะ Color เพื่อความคลีน)
+            fs.db.collection(fs.collection_name).document(listing_id).update({
+                "is_new_sheet": False, 
+                "api_synced": True,
+                "color": h_color 
+            })
+            
+            # --- [NEW] 2. เก็บ Cache ข้อมูลเข้าตะกร้าใหม่ใน Firestore (ไม่ปนกับ Leads)
+            # สร้าง Collection ชื่อ 'API_Cache' เพื่อเก็บ Log & Payload ชุดเต็ม
+            cache_payload = dict(payload)
+            cache_payload["synced_at"] = datetime.now()
+            cache_payload["listing_id"] = listing_id
+            
+            fs.db.collection("API_Cache").document(str(property_id)).set(cache_payload, merge=True)
+            
+            # --- [NEW] 3. (แถม) เก็บลง Local Folder เหมือนเดิมเพื่อความชัวร์
+            import json
+            cache_dir = os.path.join(project_root, "api_cache")
+            os.makedirs(cache_dir, exist_ok=True)
+            cache_path = os.path.join(cache_dir, f"{property_id}_{listing_id}.json")
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+                
+        else: fail_count += 1
         
-        print(f"✅ Sync ข้อมูล Listing {listing_id} เสร็จสิ้น")
-        success_count += 1
-        
-        time.sleep(1)
+        # --- พักเครื่อง 3-5 วินาที เพื่อความเนียนและมั่นคง (บอสสั่งมา!) ---
+        time.sleep(random.uniform(3.0, 5.0))
 
-    print(f"\n🎉 สรุปผล Sync New Sheet: สำเร็จ {success_count} | ล้มเหลว {fail_count}")
+    print(f"\n🎉 สรุปผล: สำเร็จ {success_count} | ข้าม {skipped_count} | ล้มเหลว {fail_count}")
 
 if __name__ == "__main__":
-    run_sync_new_sheet()
+    target = sys.argv[1] if len(sys.argv) > 1 else None
+    run_sync_new_sheet(target)

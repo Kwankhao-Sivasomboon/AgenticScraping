@@ -12,6 +12,8 @@ Description: อัปโหลดรูปภาพเข้า Production API 
 import os
 import sys
 import time
+import random
+from datetime import datetime
 
 project_root = os.path.dirname(os.path.abspath(__file__))
 if project_root not in sys.path:
@@ -19,13 +21,14 @@ if project_root not in sys.path:
 
 from src.services.firestore_service import FirestoreService
 from src.services.api_service import APIService
+from google.cloud import firestore as google_firestore
 from src.utils.image_processor import ImageService
 
 # ==============================================================
 # ⚙️ การตั้งค่า: ปรับได้ตามต้องการ
 # ==============================================================
-PROPERTY_ID_START = 1233  # api_property_id ที่เริ่มต้น
-PROPERTY_ID_END   = 1448  # api_property_id ที่สิ้นสุด
+PROPERTY_ID_START = 1821  # api_property_id ที่เริ่มต้น
+PROPERTY_ID_END   = 2175  # api_property_id ที่สิ้นสุด
 SKIP_IF_PHOTOS_EXIST = True  # ถ้า True: ข้ามทรัพย์ที่ตรวจพบมีรูปใน API อยู่แล้ว 
 USE_AI_FILTERING = True    # ถ้า True: ให้ AI คัดกรองรูป (ภายใน/ภายนอก) ก่อนอัปโหลด
 DELAY_BETWEEN_UPLOADS = 5.0    # หน่วง (วินาที) หลังจาก Upload แต่ละ Property เสร็จ
@@ -52,8 +55,8 @@ def run_upload_photos():
     print(f"📦 กำลังค้นหารายการใน Firestore ที่มี api_property_id = {PROPERTY_ID_START} ถึง {PROPERTY_ID_END}...")
     docs = (
         firestore.db.collection(firestore.collection_name)
-        .where("api_property_id", ">=", PROPERTY_ID_START)
-        .where("api_property_id", "<=", PROPERTY_ID_END)
+        .where(filter=google_firestore.FieldFilter("api_property_id", ">=", PROPERTY_ID_START))
+        .where(filter=google_firestore.FieldFilter("api_property_id", "<=", PROPERTY_ID_END))
         .stream()
     )
 
@@ -96,14 +99,17 @@ def run_upload_photos():
                 print(f"   🤖 [AI] กำลังคัดกรองรูป {len(image_urls)} รูป...")
                 result = analyze_room_images(image_urls)
                 if result:
+                    # คัดเลือกเฉพาะรูปที่ AI บอกว่าผ่าน
                     valid_image_urls = [image_urls[idx] for idx in result.valid_image_indices if idx < len(image_urls)]
-                    if not valid_image_urls:
-                        print(f"   ⚠️ AI คัดออกหมด → ใช้รูปทั้งหมดแทน")
-                        valid_image_urls = image_urls
-                    print(f"   ✅ รูปที่ผ่านการคัดกรอง: {len(valid_image_urls)}/{len(image_urls)} รูป")
                     
-                    # 🔥 บันทึกสีและสไตล์ที่ AI วิเคราะห์ได้ลง Firestore ทันทีเพื่อไม่ให้สูญหาย
-                    if result.color_name or result.style_name:
+                    if not valid_image_urls:
+                        print(f"   ⚠️ AI คัดออกหมด → ใช้รูปทั้งหมดแทนเพื่อความปลอดภัย")
+                        valid_image_urls = image_urls
+                    else:
+                        print(f"   ✅ AI คัดเหลือ: {len(valid_image_urls)}/{len(image_urls)} รูป (กำจัดรูปบอท/รูปขยะเรียบร้อย)")
+                    
+                    # 🔥 บันทึกสีและสไตล์ที่ AI วิเคราะห์ได้ลง Firestore
+                    try:
                         update_ai_data = {}
                         if result.color_name and result.color_name not in ["", "-"]:
                             update_ai_data["color"] = result.color_name
@@ -114,10 +120,12 @@ def run_upload_photos():
                             
                         if update_ai_data:
                             firestore.db.collection(firestore.collection_name).document(listing_id).update(update_ai_data)
-                            print(f"   💾 บันทึก สี/สไตล์ ลง Firestore เรียบร้อยแล้ว")
+                            print(f"   💾 บันทึก สี/สไตล์ เรียบร้อย")
+                    except Exception as fe:
+                        print(f"   ⚠️ บันทึกลง Firestore ไม่สำเร็จ (แต่รูปยังกรองอยู่): {fe}")
                 
             except Exception as e:
-                print(f"   ⚠️ AI Filtering Error: {e} → ใช้รูปทั้งหมดแทน")
+                print(f"   ⚠️ AI Filtering Logic Error: {e} → ใช้รูปทั้งหมดประคองงานไปก่อน")
                 valid_image_urls = image_urls
 
         # โหลดและประมวลผลรูปภาพ (ลบ Watermark)
@@ -128,18 +136,28 @@ def run_upload_photos():
             print(f"   ❌ โหลดรูปไม่สำเร็จ ข้ามไป...")
             fail_count += 1
         else:
-            print(f"   📤 กำลังอัปโหลด {len(processed_photos)} รูปเข้า API property {property_id}...")
-            try:
-                api.upload_photos(property_id, processed_photos)
-                print(f"   ✅ อัปโหลดสำเร็จ!")
-                success_count += 1
-            except Exception as e:
-                print(f"   ❌ Upload Error: {e}")
-                fail_count += 1
+            max_retries = 2
+            uploaded = False
+            for retry in range(max_retries + 1):
+                try:
+                    print(f"   📤 กำลังอัปโหลด {len(processed_photos)} รูปเข้า API property {property_id}... (Attempt {retry+1})")
+                    api.upload_photos(property_id, processed_photos)
+                    print(f"   ✅ อัปโหลดสำเร็จ!")
+                    success_count += 1
+                    uploaded = True
+                    break
+                except Exception as e:
+                    if "500" in str(e) and retry < max_retries:
+                        wait = 5 * (retry + 1)
+                        print(f"   ⚠️ เจอ Error 500 (Server Busy?) -> จะลองใหม่ใน {wait} วินาที...")
+                        time.sleep(wait)
+                    else:
+                        print(f"   ❌ Upload Error: {e}")
+                        fail_count += 1
+                        break
 
         # หน่วงหลัง Upload แต่ละ Property กันถูกแบน
-        import random
-        sleep_time = random.uniform(DELAY_BETWEEN_UPLOADS, DELAY_BETWEEN_UPLOADS + 3.0)
+        sleep_time = random.uniform(1.0, 3.0)
         print(f"   💤 รอ {sleep_time:.1f}s ก่อนดำเนินการต่อ...")
         time.sleep(sleep_time)
 

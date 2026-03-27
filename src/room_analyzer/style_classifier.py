@@ -18,10 +18,14 @@ class PropertyImagesAnalysis(BaseModel):
         extra='ignore' # ถ้า AI ตอบเกินมาให้ข้ามไป ไม่ต้อง Error
     )
     average_color_hex: str = Field(description="HEX code of the overall dominant room color, e.g. #FFFFFF (Left for backward compatibility, you can put any hex here)")
-    color_name: str = Field(description="Color breakdown of the room in Thai, formatted exactly as: 'กำแพงออกโทนเป็นสี... (X%ของภาพทั้งหมด) , ประตูห้องสี...(Y%ของภาพ), เฟอร์นิเจอร์สี...+... (Z%+W% ตามลำดับ)'")
+    color: str = Field(description="The single overall dominant color of the property with the highest percentage. Must be one of the predefined list colors in Thai.")
+    room_color: List[int] = Field(description="List of 14 integers summing to 100, representing color percentages in order: [Green, Brown, Red, Dark Yellow, Orange, Purple, Pink, Light Yellow, Yellowish Brown, Light Brown, White, Gray, Blue, Black]")
+    element_color: List[int] = Field(description="List of 14 integers summing to 100, representing element color percentages in the same 14-color order.")
+    element_furniture: List[List[str]] = Field(description="List of 14 lists of strings. Each sublist contains the names of furniture/appliances in that exact color in the same 14-color order. If a color has 0%, its sublist should be empty [].")
     interior_style: str = Field(description="Interior style: one of Modern, Nordic, Contemporary, Minimalist, Loft, Luxury, Other")
     property_type: str = Field(description="Property type: one of 'condo', 'house', 'unknown' based on structural cues")
-    valid_image_indices: List[int] = Field(description="List of integer indices (0-based) of images that show interior rooms. Exclude: maps, floor plans, people, animals, blurry images.")
+    valid_image_indices: List[int] = Field(description="List of integer indices (0-based) of images that show MAIN property features: INTERIOR rooms (bedroom, living room, kitchen, bathroom) or EXTERIOR of the actual house. Exclude: maps, floor plans, people, animals, blurry images.")
+    secondary_image_indices: List[int] = Field(description="List of integer indices (0-based) of images that are VALID but NOT main features: Facilities, Swimming Pool, Gym, Lobby, or Corridor. Still exclude maps/junk.")
 
 
 def download_image(url: str, retries=2) -> Optional[Image.Image]:
@@ -111,18 +115,23 @@ def analyze_room_images(image_urls: List[str]) -> Optional[PropertyImagesAnalysi
     prompt = (
         "Analyze these property images. "
         "IMPORTANT INSTRUCTIONS:\n"
-        "1. Identify valid images. IGNORE and skip any images that show ONLY: floor plans/blueprints, maps (e.g. Google Maps), pure outdoor scenery with no building, swimming pool-only shots, people/animals, or completely blurry images. Images that have watermarks or overlaid text are still VALID if they show an interior or exterior of a property.\n"
-        "2. List the 'valid_image_indices' which corresponds to the 'Image Index' labels provided for each image. ONLY include indices of images that are VALID based on the criteria above.\n"
-        "3. From the valid images, analyze the colors of the Wall, Door, and Furniture. Provide your breakdown in the 'color_name' field strictly in Thai. The string MUST conform EXACTLY to this structural format:\n"
-        "   'กำแพงออกโทนเป็นสีขาว (60%ของภาพทั้งหมด) , ประตูห้องสีน้ำตาล(20%ของภาพ), เฟอร์นิเจอร์สีดำ+เขียว+ชมพู(5%+5%+10% ตามลำดับ)'\n"
-        "   You MUST ONLY use colors from this predefined list for your descriptions. NEVER use other external color names. DO NOT write the elements (Wood, Fire, etc), ONLY write these colors:\n"
-        "   - สีเขียว, สีน้ำตาล\n"
-        "   - สีแดง, สีเหลืองเข้ม, สีส้ม, สีม่วง, สีชมพู\n"
-        "   - สีเหลืองอ่อน, สีเหลืองปนน้ำตาล, สีน้ำตาลอ่อน\n"
-        "   - สีขาว, สีเทา\n"
-        "   - สีน้ำเงิน, สีดำ\n"
-        "4. Categorize the Interior Design Style into EXACTLY ONE of these styles: Modern, Nordic, Contemporary, Minimalist, Loft, Luxury, Other.\n"
-        "5. Categorize the property_type as either 'condo', 'house', or 'unknown' based on clues like exterior views, ceiling height, or balconies."
+        "1. Identify valid images and categorize them into two lists:\n"
+        "   - 'valid_image_indices': ONLY include images that show MAIN property features: INTERIOR rooms (bedroom, living room, kitchen, bathroom) or EXTERIOR of the actual house/building.\n"
+        "   - 'secondary_image_indices': Include images that are VALID but NOT main features: Facilities, Swimming Pool, Gym, Fitness center, Lobby, Corridor, or nice building surroundings. Still exclude junk.\n"
+        "   - IGNORE and skip any images that show ONLY: maps, floor plans, blueprints, purely text-based ads/Line ID cards, people/animals, or completely blurry/irrelevant images.\n"
+        "2. List the indices (0-based) based on the criteria above.\n"
+        "3. Analyze colors of Wall, Door, and Furniture from the MAIN images and provide overall dominant 'color' in Thai.\n"
+        "4. YOU MUST evaluate exactly 14 colors in this STRICT order for 'room_color' and 'element_color':\n"
+        "   1. Green, 2. Brown, 3. Red, 4. Dark Yellow, 5. Orange, 6. Purple, 7. Pink, 8. Light Yellow, 9. Yellowish Brown, 10. Light Brown, 11. White, 12. Gray, 13. Blue, 14. Black\n"
+        "5. Provide 'room_color' and 'element_color' as JSON arrays of 14 integers summing exactly to 100.\n"
+        "6. For 'element_furniture': YOU MUST list ALL furniture and objects you can see in ALL the images. "
+        "   For each item, place it under the color index that BEST matches its dominant color. "
+        "   Be GENEROUS and inclusive — if you see a bed, sofa, wardrobe, table, chair, mirror, lamp, curtain, or any other object, list it. "
+        "   Do NOT leave sub-arrays empty if there are any items of that color in the room. "
+        "   Example: White bed → index 10 (White), Dark brown cabinet → index 9 (Light Brown) or 1 (Brown). "
+        "   The result must be an array of exactly 14 sub-arrays. Each sub-array contains English names of items.\n"
+        "7. Categorize the Interior Design Style: Modern, Nordic, Contemporary, Minimalist, Loft, Luxury, Other.\n"
+        "8. Categorize the property_type: 'condo', 'house', or 'unknown'."
     )
 
     contents = [prompt]
@@ -146,7 +155,7 @@ def analyze_room_images(image_urls: List[str]) -> Optional[PropertyImagesAnalysi
             analysis_data = response.text
             try:
                 result = PropertyImagesAnalysis.model_validate_json(analysis_data)
-                print(f"  [AI] Result Validated! Style: {result.interior_style}, Color: {result.color_name}, Images: {len(result.valid_image_indices)}")
+                print(f"  [AI] Result Validated! Style: {result.interior_style}, Color: {result.color}, Images: {len(result.valid_image_indices)}")
                 return result
             except Exception as ve:
                 print(f"  [AI] JSON Validation Error: {ve}")

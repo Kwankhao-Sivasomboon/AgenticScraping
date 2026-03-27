@@ -11,6 +11,7 @@ project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+from google.cloud import firestore as google_firestore
 from src.services.firestore_service import FirestoreService
 
 load_dotenv()
@@ -18,9 +19,9 @@ load_dotenv()
 # ==========================================
 # 🛑 ตั้งค่าสำหรับการดึงข้อมูล (เปลี่ยนได้ที่นี่)
 # ==========================================
-NEW_SHEET_URL = "https://docs.google.com/spreadsheets/d/1hHMSBt89Q22v0lO3mJmHsMEDTbZAXdlsaXNPsGkrP58/edit?gid=2052102924#gid=2052102924" # <-- ใส่ลิงก์ Google Sheet ใหม่ที่นี่ (ถ้าไม่ได้ตั้งไว้ใน .env)
-SHEET_TAB_NAME = "Condo @ 4-Alley" # <-- เปลี่ยนเป็นชื่อแท็บที่ต้องการ เช่น 'ข้อมูลใหม่'
-UPLOAD_ZONE = "บางนา" # <-- Zone ที่ต้องการให้ยัดใส่ลงไปใน Firestore (คุณแก้ได้เรื่อยๆ ก่อนรัน)
+NEW_SHEET_URL = "https://docs.google.com/spreadsheets/d/1fSNXzAI8zqKxJppC5K7RuZDXpQdb0DeG96G8r6fjKmk/edit?gid=0#gid=0"
+SHEET_TAB_NAME = "Assets @ Accross BKK"
+UPLOAD_ZONE = "คลองเตย"
 # ==========================================
 
 
@@ -46,7 +47,9 @@ def run_import():
         tab_name = input(f"💬 กรุณาใส่ชื่อ Tab (ค่าเริ่มต้น '{SHEET_TAB_NAME}'): ").strip() or SHEET_TAB_NAME
         worksheet = doc.worksheet(tab_name)
     except Exception as e:
-        print(f"❌ จัดการ Google Sheets ล้มเหลว: {e}")
+        import traceback
+        print(f"❌ จัดการ Google Sheets ล้มเหลว:")
+        traceback.print_exc()
         return
 
     # ดึงข้อมูลทั้งหมดจาก Sheet
@@ -87,20 +90,32 @@ def run_import():
     success_count = 0
     duplicate_count = 0
     fail_count = 0
+    processed_count = 0  # นับเฉพาะรายการที่ผ่าน Zone filter และประมวลผลจริง
 
     for i, row in enumerate(records, start=2): # +2 เพราะ header คือ 1 และ index เริ่มจาก 0
-        # เช็ค Limit
-        if limit is not None and success_count + duplicate_count >= limit:
+        # เช็ค Limit (ใช้ processed_count เพื่อให้นับได้ถูกต้องทั้ง new และ update)
+        if limit is not None and processed_count >= limit:
             print(f"\n✋ ครบกำหนด {limit} รายการตามที่แจ้งไว้ในโหมดทดสอบแล้ว หยุดการทำงาน...")
             break
             
+        # --- ZONE FILTER: ตรวจสอบจาก Column 'โซน' (คอลัมน์ AD) ---
+        row_zone = str(row.get('โซน', '')).strip()
+        
+        # [New] ถ้าใส่ 'all' ให้ข้ามการกรอง และใช้โซนจากในแถวนั้นๆ แทน
+        if zone_input.lower() != 'all' and row_zone != zone_input:
+            # print(f"⏭️ ข้ามแถวที่ {i}: โซน '{row_zone}' ไม่ตรงกับ '{zone_input}'")
+            continue
+            
+        # เลือกโซนที่จะบันทึก: ถ้าโหมด all ให้ใช้จาก sheet, ถ้าโหมดเจาะจงให้ใช้ตาม input
+        target_zone = row_zone if zone_input.lower() == 'all' else zone_input
+
         # หาคอลัมน์ลิงค์แบบยืดหยุ่น (เผื่อก๊อปปี้มาแล้วตั้งชื่อว่า 'ลิงค์', 'Link', หรือ 'URL')
         link = str(row.get('ลิงค์', row.get('Link', row.get('URL', '')))).strip()
         if not link:
             continue
             
         print(f"\n======================================")
-        print(f"🔍 กำลังตรวจสอบแถวที่ {i}: {row.get('ชื่อโครงการ', 'ไม่ระบุ')}")
+        print(f"🔍 กำลังตรวจสอบแถวที่ {i}: {row.get('ชื่อโครงการ', 'ไม่ระบุ')} (โซน: {row_zone})")
         
         # 3. เช็ค Duplicate (จาก Field 'url' ใน Firestore)
         # พยายามดึง ID จากลิงก์ (เช่น gDgDjg_CjfgygI) เพื่อความสวยงามและไล่ข้อมูลง่าย
@@ -114,8 +129,8 @@ def run_import():
         is_update = False
         
         try:
-            # ใช้ query Where url == link
-            existing_docs = firestore.db.collection(firestore.collection_name).where("url", "==", link).limit(1).get()
+            # ใช้ google_firestore.FieldFilter เพื่อเลี่ยง warning (Firestore >= 2.0)
+            existing_docs = firestore.db.collection(firestore.collection_name).where(filter=google_firestore.FieldFilter("url", "==", link)).limit(1).get()
             if len(existing_docs) > 0:
                 new_listing_id = existing_docs[0].id
                 is_update = True
@@ -127,7 +142,7 @@ def run_import():
 
         # สร้างข้อมูลอัปเดต (ดึงแบบไดนามิกตามคอลัมน์ที่มีใน Sheet)
         raw_data_updates = {
-            "zone": zone_input,
+            "zone": target_zone,
             "status": "new_sheet", # บันทึกสถานะตามที่ขอ แทนที่จะปล่อยเป็น active ธรรมดา
             "last_imported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "source_sheet": f"{doc.title} ({tab_name})"
@@ -165,13 +180,30 @@ def run_import():
 
         if not is_update:
             # --- สร้างรายการใหม่ (New Listing) ---
+            new_import_count = 1
+            
+            # ตรวจสอบ listing_type จากทั้ง 2 source พร้อมกัน (ราคา + S or R column)
+            sor_text = str(row.get('S or R', '')).lower().strip()
+            has_sell = sell_price > 0 or 'sale' in sor_text or sor_text == 's'
+            has_rent = rent_price > 0 or 'rent' in sor_text or sor_text == 'r'
+            
+            if has_sell and has_rent:
+                listing_type = "sale_or_rent"
+            elif has_rent:
+                listing_type = "rent"
+            elif has_sell:
+                listing_type = "sale"
+            else:
+                listing_type = "sale"  # default สุดท้าย
+            
             raw_data = {
                 "url": link,
                 "title": f"{row.get('ชื่อโครงการ', '')} {row.get('Unit Type', '')}",
                 "sell_price": sell_price,
                 "rent_price": rent_price,
-                "type": "sale" if 's' in str(row.get('S or R', '')).lower() else ("rent" if 'r' in str(row.get('S or R', '')).lower() else "sale"),
-                "status": "new_sheet",
+                "type": listing_type,
+                "status": f"new_sheet_v{new_import_count}",
+                "import_count": new_import_count,
                 "api_synced": False # ตั้งเป็น False เพื่อให้ระบบหลักดึงไปอัปโหลดเข้า Agent API !
             }
             raw_data.update(raw_data_updates) # รวมฟิลด์พิเศษจากชีตเข้าไปด้วย
@@ -200,6 +232,7 @@ def run_import():
             if saved:
                 print(f"✅ เพิ่ม {new_listing_id} เข้า Firestore แล้ว")
                 success_count += 1
+                processed_count += 1
             else:
                 print(f"❌ ไม่สามารถเซฟ {new_listing_id} ได้")
                 fail_count += 1
@@ -207,11 +240,25 @@ def run_import():
             # --- อัปเดตรายการเดิม (Update Existing) ---
             try:
                 doc_ref = firestore.db.collection(firestore.collection_name).document(new_listing_id)
+                
+                # ดึงข้อมูลเดิมมาดูว่า Import ไปกี่ครั้งแล้ว
+                old_snap = doc_ref.get()
+                old_data = old_snap.to_dict() if old_snap.exists else {}
+                old_count = old_data.get("import_count", 0)
+                if not isinstance(old_count, int): old_count = 0
+                new_import_count = old_count + 1
+                
                 # รวมข้อมูลจาก Sheet ไปชนกับ Root Document อย่างปลอดภัย
+                raw_data_updates["import_count"] = new_import_count
+                raw_data_updates["status"] = f"new_sheet_v{new_import_count}"
+                raw_data_updates["api_synced"] = False # บังคับ Re-sync
+                raw_data_updates["is_new_sheet"] = True # บังคับให้ระบบ Sync มองเห็นเป็นงานใหม่
+                
                 doc_ref.set(raw_data_updates, merge=True)
                 
                 # เตรียมข้อมูลสำคัญอัปเดตลง AI Analysis
                 analysis_update = {}
+                # ... (ส่วนอื่นเหมือนเดิม)
                 if str(row.get('เบอร์โทรเจ้าของ', '')).strip() and str(row.get('เบอร์โทรเจ้าของ', '')).strip() != '-':
                     analysis_update["phone_number"] = str(row.get('เบอร์โทรเจ้าของ', '')).strip()
                 if str(row.get('ชื่อเจ้าของ', '')).strip() and str(row.get('ชื่อเจ้าของ', '')).strip() != '-':
@@ -230,11 +277,9 @@ def run_import():
                     analysis_ref = doc_ref.collection('Analysis_Results').document('evaluation')
                     analysis_ref.set(analysis_update, merge=True)
                     
-                # ตั้งค่าให้กลับมา Sync ใหม่ เพราะข้อมูลเปลี่ยน
-                doc_ref.update({"api_synced": False, "status": "new_sheet"})
-                    
-                print(f"✅ อัปเดตข้อมูลเพิ่มเติมให้ {new_listing_id} แล้ว")
-                duplicate_count += 1 # นับรวมในช่องซ้ำ (แต่อัปเดตแล้ว)
+                print(f"✅ อัปเดตข้อมูลเป็น V{new_import_count} ให้ {new_listing_id} แล้ว")
+                duplicate_count += 1
+                processed_count += 1
             except Exception as e:
                 print(f"❌ เกิดข้อผิดพลาดในการอัปเดต {new_listing_id}: {e}")
                 fail_count += 1
