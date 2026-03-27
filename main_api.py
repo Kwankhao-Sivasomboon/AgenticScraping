@@ -45,7 +45,7 @@ def process_property_analysis(property_id: int):
     logger.info(f"🚀 [Task Started] Processing Property ID: {property_id}")
     
     # 1. Initialize Services
-    api_key = os.getenv('GEMINI_API_KEY_COLOR') or os.getenv('GEMINI_API_KEY')
+    api_key = os.getenv('CLOUD_API_COLOR') or os.getenv('GEMINI_API_KEY_COLOR') or os.getenv('GEMINI_API_KEY')
     if not api_key:
         logger.error("❌ Gemini API Key not configured.")
         return

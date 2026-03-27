@@ -1,5 +1,6 @@
-.git/
 .env*
+env.yaml
+GCPPowerShell.txt
 .DS_Store
 __pycache__/
 *.pyc
@@ -15,3 +16,4 @@ build/
 *.DS_Store
 agent_scraping/
 .gemini/
+api_cache/

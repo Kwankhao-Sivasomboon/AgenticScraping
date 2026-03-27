@@ -1,6 +1,7 @@
 # Credentials & Secrets
 .env
 credentials.json
+env.yaml
 playwright_state.json
 GCPPowerShell.txt
 agentic-scraping-pptd-f7bc092f86f3.json
