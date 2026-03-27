@@ -1,27 +1,17 @@
-# Exclude secrets during build (will be passed as volumes or environment variables later)
-.env
-credentials.json
-playwright_state.json
-
-# Exclude Git files
-.git
-.gitignore
-
-# Exclude Python artifacts
-__pycache__
+.git/
+.env*
+.DS_Store
+__pycache__/
 *.pyc
 *.pyo
-*.pyd
-.Python
-env
-venv
-.venv
-GCPPowerShell.txt
-agentic-scraping-pptd-f7bc092f86f3.json
-
-# Exclude local configs/logs
-*.log
-.DS_Store
-README.md
-Dockerfile
-.dockerignore
+venv/
+env/
+.venv/
+.pytest_cache/
+tmp/
+node_modules/
+dist/
+build/
+*.DS_Store
+agent_scraping/
+.gemini/

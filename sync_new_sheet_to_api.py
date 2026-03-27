@@ -150,6 +150,7 @@ def run_sync_new_sheet(target_arg=None):
         if arg_lower == "all": mode = "all"
         elif arg_lower == "nolatlng": mode = "nolatlng"
         elif arg_lower == "unsynced": mode = "unsynced"
+        elif arg_lower == "fixlo": mode = "fixlo"
         elif arg_lower == "limit" and len(sys.argv) > 2:
             mode = "limit"
             limit_count = int(sys.argv[2])
@@ -165,6 +166,16 @@ def run_sync_new_sheet(target_arg=None):
     if mode == "single":
         query = fs.db.collection(fs.collection_name).where("api_property_id", "in", [int(target_arg), str(target_arg)]).limit(1).get()
         target_items = list(query) if query else [fs.db.collection(fs.collection_name).document(target_arg).get()]
+    elif mode == "fixlo":
+        print("🛠️ โหมด FixLo: กำลังเตรียมกู้คืนพิกัดสำหรับกลุ่มเป้าหมาย...")
+        fix_list = [765,487,1304]
+        # ค้นหาทีละตัวจาก Firestore
+        target_items = []
+        for pid in fix_list:
+            docs = list(fs.db.collection(fs.collection_name).where("api_property_id", "in", [int(pid), str(pid)]).limit(1).get())
+            if docs: target_items.append(docs[0])
+            else: print(f"  ⚠️ ไม่พบ ID {pid} ใน Firestore")
+        print(f"🎯 พร้อมซ่อมพิกัดทั้งหมด: {len(target_items)} รายการ")
     elif mode == "unsynced":
         print("🔍 Scanning Firestore specifically for UNSYNCED items (Retry Mode)...")
         # 🎯 กรองเอาตัวที่ยังไม่สำเร็จ และไม่ใช่รายการที่โดน Approve แล้ว
@@ -305,6 +316,11 @@ def run_sync_new_sheet(target_arg=None):
         }
         payload["specification_values"] = {"common_facilities": ai_evaluation.get("common_facilities", ["-"])}
 
+        # 🎯 [โหมด FixLo] บังคับล้างพิกัดทิ้งเพื่อให้เข้าสู่ลอจิกการหาใหม่ด้านล่าง
+        if mode == "fixlo":
+            print(f"🔄 ID {property_id}: บังคับค้นหาพิกัดใหม่ทับของเก่าที่เพี้ยน...")
+            payload["latitude"], payload["longitude"] = None, None
+
         if not payload["latitude"] or not payload["longitude"] or payload["latitude"] == "0" or payload["longitude"] == "0":
             print(f"🕵️‍♂️ Missing Lat/Lng for '{payload['name']}'. Attempting Google Maps Lookup...")
             from src.services.maps_service import get_location_details
@@ -320,17 +336,20 @@ def run_sync_new_sheet(target_arg=None):
                 if payload["address"] == "-": 
                     payload["address"] = map_info["address"]
                 
-                # 🏙️ [FALLBACK] ถ้า City ยังว่างอยู่จนถึงตอนนี้ (เพราะระบุโซนไม่ได้) ให้ดึงจาก Google Maps
-                if not payload.get("city") and map_info.get("city"):
-                    payload["city"] = map_info["city"]
-                    print(f"   🏙️ Found City from Google: {payload['city']}")
+                # 🏙️ [FALLBACK] ถ้า City ยังว่างอยู่จนถึงตอนนี้ ให้ดึงข้อมูลที่ใกล้เคียงที่สุดจาก Google มาใส่ (ห้ามส่งค่าว่าง!)
+                if not payload.get("city"):
+                    payload["city"] = map_info.get("city") or map_info.get("state") or map_info.get("sub_district") or map_info.get("postal_code") or "-"
+                    print(f"   🏙️ Found Fallback City: {payload['city']}")
                 
-                # 🛠️ [SAVE BACK] บันทึกพิกัดใหม่กลับลง Firestore ทันที (ฟิลด์แท้)
-                fs.db.collection(fs.collection_name).document(listing_id).update({
+                # 🛠️ [SAVE BACK] บันทึกพิกัดและที่อยู่ใหม่กลับลง Firestore ทันที
+                save_data = {
                     "latitude": payload["latitude"],
-                    "longitude": payload["longitude"]
-                })
-                print(f"   ✅ Foundry: {payload['latitude']}, {payload['longitude']} (Saved to Firestore)")
+                    "longitude": payload["longitude"],
+                    "address": payload["address"],
+                    "city": payload["city"]
+                }
+                fs.db.collection(fs.collection_name).document(listing_id).update(save_data)
+                print(f"   ✅ Foundry: {payload['latitude']}, {payload['longitude']} (Saved All to Firestore)")
                 
                 # --- [NEW] พักหายใจ 1 วิ ก่อนจะไปลุยยิง API ต่อยอด ---
                 time.sleep(1.0)
@@ -389,7 +408,10 @@ def run_sync_new_sheet(target_arg=None):
             with open(cache_path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
                 
-        else: fail_count += 1
+        else: 
+            p_desc = f"Property {property_id}" if property_id else f"Listing {listing_id}"
+            print(f"❌ {p_desc} FAILED during API Sync. Check response logs above.")
+            fail_count += 1
         
         # --- พักเครื่อง 3-5 วินาที เพื่อความเนียนและมั่นคง (บอสสั่งมา!) ---
         time.sleep(random.uniform(3.0, 5.0))

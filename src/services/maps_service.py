@@ -16,28 +16,35 @@ def get_location_details(project_name: str) -> dict:
     if not project_name or project_name == "-":
         return {}
         
-    print(f"🗺️ [Maps Service] กำลังสืบค้นข้อมูลพิกัดสถานที่จากชื่อโครงการ: '{project_name}'...")
-    url = "https://maps.googleapis.com/maps/api/geocode/json"
+    print(f"🗺️ [Places API NEW] กำลังสืบค้นข้อมูลพิกัดสถานที่จากชื่อโครงการ: '{project_name}'...")
     
-    params = {
-        "address": project_name,
-        "key": api_key,
-        "language": "th",  # ภาษาไทย
-        "region": "th"
+    # 🎯 ใช้ Google Places API (New - v1) ซึ่งประหยัดและแม่นยำกว่า
+    url = "https://places.googleapis.com/v1/places:searchText"
+    
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": api_key,
+        "X-Goog-FieldMask": "places.displayName,places.formattedAddress,places.location,places.addressComponents"
+    }
+    
+    payload = {
+        "textQuery": project_name,
+        "languageCode": "th",
+        "regionCode": "th"
     }
     
     try:
-        response = requests.get(url, params=params, timeout=10)
+        response = requests.post(url, json=payload, headers=headers, timeout=10)
         response.raise_for_status()
         data = response.json()
         
-        if data.get("status") == "OK" and len(data.get("results", [])) > 0:
-            result = data["results"][0]
+        if data.get("places") and len(data["places"]) > 0:
+            place = data["places"][0]
             
             location_info = {
-                "address": result.get("formatted_address", ""),
-                "latitude": str(result["geometry"]["location"]["lat"]),
-                "longitude": str(result["geometry"]["location"]["lng"]),
+                "address": place.get("formattedAddress", ""),
+                "latitude": str(place["location"]["latitude"]),
+                "longitude": str(place["location"]["longitude"]),
                 "state": "",
                 "city": "",
                 "sub_district": "",
@@ -45,28 +52,30 @@ def get_location_details(project_name: str) -> dict:
                 "country": ""
             }
             
-            # แปลง Address Components
-            for comp in result.get("address_components", []):
+            # --- [NEW] ดึง Address Components จากคำตอบเดียวได้เลย (ไม่ต้องยิงซ้ำ!) ---
+            for comp in place.get("addressComponents", []):
                 types = comp.get("types", [])
-                long_name = comp.get("long_name", "")
+                long_name = comp.get("longText", "")
                 
-                if "administrative_area_level_1" in types:  # จังหวัด (State/Province)
+                if "administrative_area_level_1" in types: 
                     location_info["state"] = long_name
-                elif "locality" in types or "administrative_area_level_2" in types:  # เขต/อำเภอ (City/District)
-                    location_info["city"] = long_name
-                elif "sublocality" in types or "sublocality_level_1" in types: # แขวง/ตำบล (Sub-district)
+                elif "locality" in types or "administrative_area_level_2" in types or "sublocality_level_1" in types: 
+                    # 🏙️ พยายามดึงเขต/อำเภอ (ถ้าเป็น กทม. บางทีจะเป็น sublocality_level_1)
+                    if not location_info["city"] or "administrative_area_level_2" in types:
+                        location_info["city"] = long_name
+                elif "sublocality" in types: 
                     location_info["sub_district"] = long_name
-                elif "postal_code" in types:
+                elif "postal_code" in types: 
                     location_info["postal_code"] = long_name
-                elif "country" in types:
+                elif "country" in types: 
                     location_info["country"] = long_name
-            
-            print(f"  [Maps] ✅ ค้นพบพิกัดสำเร็จ: {location_info['latitude']}, {location_info['longitude']}")
+
+            print(f"  [Maps] ✅ ค้นพบพิกัดสำเร็จ (New API): {location_info['latitude']}, {location_info['longitude']}")
             return location_info
         else:
-            print(f"  [Maps] ⚠️ ไม่พบสถานที่จากชื่อโครงการนี้ (Status: {data.get('status')})")
+            print(f"  [Maps] ⚠️ ไม่พบสถานที่จากชื่อโครงการนี้ (Status: Empty Response)")
             return {}
             
     except Exception as e:
-        print(f"  [Maps] ❌ เกิดข้อผิดพลาดในการดึงข้อมูลจาก Maps API: {e}")
+        print(f"  [Maps] ❌ เกิดข้อผิดพลาดในการดึงข้อมูลจาก Places API (New): {e}")
         return {}

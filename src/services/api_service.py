@@ -192,7 +192,7 @@ class APIService:
                     print(f"   📥 Raw Response: {res_body}")
                 
                 # --- 🚫 Logic ขยับพิกัดหลบ Duplicate (Random Jitter) ---
-                if duplicate_attempt < 10:
+                if duplicate_attempt < 5:
                     duplicate_attempt += 1
                     import random
                     
@@ -205,7 +205,7 @@ class APIService:
                     if 'longitude' in payload and payload['longitude']:
                         payload['longitude'] = float(payload['longitude']) + offset_lng
 
-                    print(f"🔄 Duplicate Workaround: สลัดพิกัดใหม่ (Random) และพยายามอีกครั้ง (Attempt {duplicate_attempt}/10)...")
+                    print(f"🔄 Duplicate Workaround: สลัดพิกัดใหม่ (Random) และพยายามอีกครั้ง (Attempt {duplicate_attempt}/5)...")
                     time.sleep(random.uniform(1.0, 3.0)) # 🐢 พักนิดนึงเพื่อให้ Server ไม่มึน
                     return self.create_property(payload, retry_on_401=retry_on_401, duplicate_attempt=duplicate_attempt)
                 else:
