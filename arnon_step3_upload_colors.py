@@ -6,6 +6,10 @@ from src.services.api_service import APIService
 
 load_dotenv()
 
+# 🎯 [CONFIG] ระบุช่วงของ Property ID ที่ต้องการอัปโหลดข้อมูลสีเข้าระบบ Staff
+START_ID = 428
+END_ID = 428
+
 # Predefined 14 colors in Thai
 THAI_COLORS = [
     "เขียว", "น้ำตาล", "แดง", "เหลืองเข้ม", "ส้ม", "ม่วง", "ชมพู", 
@@ -15,32 +19,30 @@ THAI_COLORS = [
 def upload_arnon_analysis():
     fs = FirestoreService()
     
-    # Login as Staff
-    staff_email = os.getenv('AGENT_ARNON_EMAIL')
-    staff_pass = os.getenv('AGENT_ARNON_PASSWORD')
-    api = APIService(email=staff_email, password=staff_pass)
+    # 🚀 ปล่อยให้ APIService เลือก Email/Password ฝั่ง Staff จาก .env เองอัตโนมัติ
+    api = APIService()
     
     if not api.authenticate_staff():
-        print("Staff Authentication failed.")
+        print("Staff Authentication failed. Please check STAFF_API_EMAIL in .env")
         return
 
-    from google.cloud.firestore_v1.base_query import FieldFilter
-    # Fetch properties that are analyzed but not yet uploaded
-    docs = list(fs.db.collection("ARNON_properties")
-                .where(filter=FieldFilter("analyzed", "==", True))
-                .where(filter=FieldFilter("uploaded", "==", False))
-                .limit(500) 
-                .stream())
-    
-    if not docs:
-        print("All analyzed properties have been uploaded.")
-        return
+    print(f"Starting upload for IDs: {START_ID} ถึง {END_ID}...")
 
-    print(f"Starting upload for {len(docs)} properties to Staff API...")
-
-    for doc in docs:
-        prop_id = doc.id
+    for pid in range(START_ID, END_ID + 1):
+        prop_id = str(pid)
+        doc_ref = fs.db.collection("ARNON_properties").document(prop_id)
+        doc = doc_ref.get()
+        
+        if not doc.exists:
+            print(f"⚠️ Skip {prop_id}: ไม่พบข้อมูลใน Firestore (ต้องรัน Step 1/2 ก่อน)")
+            continue
+            
         data = doc.to_dict()
+        
+        # กรองเอาเฉพาะตัวที่วิเคราะห์แล้ว
+        if not data.get("analyzed"):
+            print(f"⚠️ Skip {prop_id}: ยังไม่ได้วิเคราะห์สี (Analyzed=False)")
+            continue
         
         # 1. Expand element_furniture from flattened string to List[List[str]]
         raw_furniture = data.get("element_furniture", [])
@@ -58,8 +60,12 @@ def upload_arnon_analysis():
         dominant_color_thai = THAI_COLORS[max_idx]
 
         # 3. Construct Payload based on Staff API spec
+        from datetime import datetime
+        now_iso = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+
         payload = {
             "property_id": int(prop_id),
+            "analyzed_at": now_iso, # 🕒 เพิ่มเวลาที่วิเคราะห์จริง
             "average_color_hex": "#FFFFFF", 
             "color": dominant_color_thai,
             "room_color": data.get("room_color"),

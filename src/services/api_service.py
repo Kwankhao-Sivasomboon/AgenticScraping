@@ -9,8 +9,9 @@ load_dotenv()
 class APIService:
     def __init__(self, email=None, password=None):
         self.base_url = os.getenv('AGENT_API_BASE_URL', 'http://localhost/api')
-        self.email = email or os.getenv('AGENT_API_EMAIL', 'agent@example.com')
-        self.password = password or os.getenv('AGENT_API_PASSWORD', 'password123')
+        # ลอจิกการดึง Credentials: ใช้ AGENT_API (General) ก่อน ถ้าไม่มีค่อยไป AGENT_ARNON (Specific)
+        self.email = email or os.getenv('AGENT_API_EMAIL') or os.getenv('AGENT_ARNON_EMAIL') or 'agent@example.com'
+        self.password = password or os.getenv('AGENT_API_PASSWORD') or os.getenv('AGENT_ARNON_PASSWORD') or 'password123'
         self.token = os.getenv('AGENT_API_TOKEN')  # Can provide token directly to bypass login
         
         # Staff Credentials (Using explicit STAFF_ variables for total clarity)
@@ -75,39 +76,82 @@ class APIService:
                     time.sleep(5)
                 else:
                     return False
-        return False
+    def authenticate(self):
+        """
+        [AGENT] Login to Agent API to get access token.
+        Endpoint: /agent/login
+        """
+        if self.token: return True
+        
+        # สำหรับ AGENT ให้ยิงไปที่ /api/agent/login
+        base = self.base_url.rstrip('/')
+        if '/api' in base:
+            login_url = f"{base}/agent/login"
+        else:
+            login_url = f"{base}/api/agent/login"
+            
+        payload = {"email": self.email, "password": self.password}
+        
+        # 🕵️‍♂️ ส่องสถานะกุญแจ: ปริ้นท์เมล์ออกมาโชว์ให้บอสเห็นหน้างานเลยครับ
+        print(f"🔐 Authenticating Agent API...")
+        print(f"   📧 Using Email: '{self.email}'")
+        print(f"   🌐 URL Target: {login_url}")
+        
+        try:
+            response = requests.post(login_url, json=payload, timeout=20)
+            if response.status_code == 200:
+                res_json = response.json()
+                # 🕵️‍♂️ ดักจับ Token ทั้งแบบ Root และแบบที่อยู่ใน Data ห่อหุ้ม
+                self.token = res_json.get('token') or res_json.get('data', {}).get('token')
+                
+                if self.token:
+                    print(f"✅ Agent Authentication Successful for '{self.email}'.")
+                    return True
+                else:
+                    print(f"❌ Failed to extract token from login response: {res_json}")
+                    return False
+            else:
+                print(f"❌ Agent Auth Failed ({response.status_code}): {response.text}")
+                return False
+        except Exception as e:
+            print(f"❌ Agent Auth Error: {e}")
+            return False
 
     def authenticate_staff(self):
         """
-        Login as staff and get the token.
+        [STAFF] Login to Staff API for data uploads.
+        Endpoint: /api/staff/login
         """
-        if not self.staff_email or not self.staff_password:
-            if self.staff_token:
-                print("ℹ️ Using STAFF_API_TOKEN from .env (no staff credentials)")
-                return True
-            print("❌ No staff email/password in .env")
-            return False
-            
-        print("🔐 Authenticating Staff API...")
-        url = f"{self.base_url}/api/staff/login"
-        payload = {"email": self.staff_email, "password": self.staff_password}
-        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if self.staff_token: return True
         
+        # สำหรับ STAFF ให้ยิงไปที่ /api/staff/login
+        base = self.base_url.rstrip('/')
+        if '/api' in base:
+             staff_login_url = base + "/staff/login"
+        else:
+             staff_login_url = base + "/api/staff/login"
+             
+        payload = {"email": self.staff_email, "password": self.staff_password}
+        
+        print(f"🔐 Authenticating STAFF API ({self.staff_email})...")
         try:
-            response = requests.post(url, json=payload, headers=headers, timeout=15)
-            response.raise_for_status()
-            res_json = response.json()
-            data_part = res_json.get('data', {})
-            self.staff_token = data_part.get('token')
-            
-            if self.staff_token:
-                print("✅ Staff Authentication Successful.")
-                return True
+            response = requests.post(staff_login_url, json=payload, timeout=20)
+            if response.status_code == 200:
+                res_json = response.json()
+                # 🕵️‍♂️ ดักจับ Token ทั้งแบบ Root และแบบที่อยู่ใน Data ห่อหุ้ม
+                self.staff_token = res_json.get('token') or res_json.get('data', {}).get('token')
+                
+                if self.staff_token:
+                    print(f"✅ Staff Authentication Successful for '{self.staff_email}'.")
+                    return True
+                else:
+                    print(f"❌ Failed to extract staff token: {res_json}")
+                    return False
             else:
-                print("❌ Staff Authentication Failed: Token not found.")
+                print(f"❌ Staff Auth Failed ({response.status_code}): {response.text}")
                 return False
         except Exception as e:
-            print(f"❌ Staff Authentication Failed: {e}")
+            print(f"❌ Staff Auth Error: {e}")
             return False
 
             
@@ -444,11 +488,15 @@ class APIService:
         Submit Color Analysis to staff API endpoint.
         POST {{base_url}}/api/staff/color-analyses
         """
-        if not self.staff_token:
-            self.authenticate_staff()
+        print(f"🎨 Submitting Color Analysis to Staff API...")
+        
+        base = self.base_url.rstrip('/')
+        if '/api' in base:
+            url = f"{base}/staff/color-analyses"
+        else:
+            url = f"{base}/api/staff/color-analyses"
             
-        print(f"🎨 Submitting Color Analysis to /api/staff/color-analyses...")
-        url = f"{self.base_url}/api/staff/color-analyses"
+        print(f"   🌐 Staff Target: {url}")
         headers = self._get_staff_auth_headers()
         
         try:

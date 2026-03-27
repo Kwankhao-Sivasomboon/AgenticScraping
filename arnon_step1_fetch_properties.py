@@ -8,11 +8,9 @@ from src.services.api_service import APIService
 load_dotenv()
 
 BASE_URL = os.getenv('AGENT_API_BASE_URL', 'http://localhost/api')
-EMAIL = os.getenv('AGENT_ARNON_EMAIL')
-PASSWORD = os.getenv('AGENT_ARNON_PASSWORD')
-
 def fetch_arnon_properties_silent():
-    api = APIService(email=EMAIL, password=PASSWORD)
+    # 🚀 ปล่อยให้ APIService เลือก Email/Password จาก .env เองตามลำดับความสำคัญ
+    api = APIService()
     if not api.authenticate():
         print("Login failed.")
         return
@@ -51,8 +49,8 @@ def fetch_arnon_properties_silent():
         batch = fs.db.batch()
         for prop in properties:
             prop_id = str(prop.get("id"))
-            images = prop.get("images", [])
-            
+            # 🕵️‍♂️ กรองเอาเฉพาะภาพห้อง (Gallery) เท่านั้น
+            images = [img for img in prop.get("images", []) if img.get("tag") == "gallery"]
             image_data_list = [{"id": i.get("id"), "url": i.get("url")} for i in images]
             
             doc_ref = fs.db.collection("ARNON_properties").document(prop_id)

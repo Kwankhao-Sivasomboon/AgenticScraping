@@ -51,7 +51,7 @@ def process_property_analysis(property_id: int):
         return
 
     client = genai.Client(api_key=api_key)
-    api = APIService(email=os.getenv('AGENT_ARNON_EMAIL'), password=os.getenv('AGENT_ARNON_PASSWORD'))
+    api = APIService() # 🚀 ปล่อยให้ APIService เลือก Email/Password จาก .env เองตามลำดับความสำคัญ
     api.authenticate()
 
     # 2. Get Property Status / Details (to verify it exists and get image count, optional but good for validation)
@@ -59,21 +59,33 @@ def process_property_analysis(property_id: int):
     logger.info(f"   Status for {property_id}: {status}")
 
     # 3. Retrieve and Refresh Photo URLs
-    # สำหรับเคสนี้ เราอาจจะต้องดึง Data Property เต็มๆ มาก่อนเพื่อเอา image_ids
-    # สมมติฐาน: api.py สามารถขอข้อมูล /api/agent/properties/{id} ได้
     try:
-        url_prop = f"{api.base_url}/api/agent/properties/{property_id}"
+        base = api.base_url.rstrip('/')
+        if '/api' in base:
+            url_prop = f"{base}/agent/properties/{property_id}/status"
+        else:
+            url_prop = f"{base}/api/agent/properties/{property_id}/status"
+            
         headers_prop = api._get_auth_headers()
         import requests
+        
+        logger.info(f"   🌐 Fetching Detail from: {url_prop}")
         r_prop = requests.get(url_prop, headers=headers_prop, timeout=15)
-        prop_data = r_prop.json().get('data', {})
+        res_json = r_prop.json()
+        
+        # 🕵️‍♂️ ดักจับทั้งแบบที่มี 'data' หุ้ม และไม่มีหุ้ม (PPTD Style)
+        prop_data = res_json.get('data', res_json) 
         images_info = prop_data.get('images', [])
         
-        if not images_info:
-            logger.warning(f"⚠️ No images found for Property {property_id}.")
+        # 🕵️‍♂️ กรองเอาเฉพาะภาพที่มี tag เป็น "gallery" (ไม่เอาภาพส่วนกลาง/สิ่งอำนวยความสะดวก)
+        gallery_images = [img for img in images_info if img.get("tag") == "gallery"]
+        
+        if not gallery_images:
+            logger.warning(f"⚠️ No 'gallery' images found for Property {property_id}. Full response: {res_json}")
             return
             
-        img_ids = [img.get("id") for img in images_info if img.get("id")]
+        img_ids = [img.get("id") for img in gallery_images if img.get("id")]
+        logger.info(f"📸 Found {len(img_ids)} gallery images to analyze.")
         
         logger.info(f"🔄 Refreshing Signed URLs for {len(img_ids)} images...")
         refreshed = api.refresh_photo_urls(img_ids)
@@ -158,15 +170,19 @@ def process_property_analysis(property_id: int):
         max_idx = element_colors.index(max(element_colors)) if any(element_colors) else 10
         dominant_color_thai = THAI_COLORS[max_idx]
         
+        from datetime import datetime
+        now_iso = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z' # 🕒 เวลาปัจจุบัน ISO Format
+
         struct_payload = {
             "property_id": int(property_id),
+            "analyzed_at": now_iso, # 🕒 เพิ่มเวลาที่วิเคราะห์
             "average_color_hex": "#FFFFFF",
             "color": dominant_color_thai,
             "room_color": res.room_color,
             "furniture_color": res.element_color,
             "furniture_elements": formatted_furniture,
             "interior_style": res.architect_style,
-            "property_type": "house"  # หรือตรรกะที่คุณใช้คัดว่าเป็นบ้านหรือคอนโด
+            "property_type": "house"
         }
         
         if api.submit_color_analysis(struct_payload):

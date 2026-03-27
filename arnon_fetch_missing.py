@@ -6,19 +6,21 @@ from src.services.api_service import APIService
 
 load_dotenv()
 
+# 🎯 [CONFIG] ระบุช่วงของ Property ID ที่ต้องการกู้ข้อมูล
+START_ID = 428
+END_ID = 428
+
 def fetch_specific_ids():
     fs = FirestoreService()
-    api = APIService(email=os.getenv('AGENT_ARNON_EMAIL'), password=os.getenv('AGENT_ARNON_PASSWORD'))
+    api = APIService() # 🚀 ปล่อยให้ APIService เลือก Email/Password จาก .env เองตามลำดับความสำคัญ
     api.authenticate()
     
-    # ช่วง ID ที่บอสต้องการส่องเป็นพิเศษ
-    target_ids = list(range(73, 85)) 
-    print(f"Searching for images for IDs: {target_ids}")
+    print(f"Searching for images for IDs: {START_ID} to {END_ID}")
     
     headers = api._get_auth_headers()
     base = api.base_url.rstrip('/')
     
-    for pid in target_ids:
+    for pid in range(START_ID, END_ID + 1):
         print(f" Inspecting ID {pid} via Status & Detail endpoints...")
         
         # ลองส่องที่หลายๆ endpoint ที่อาจจะมีข้อมูลรูปซ่อนอยู่
@@ -40,9 +42,15 @@ def fetch_specific_ids():
                         
                     images = prop_data.get("images", []) or data.get("images", [])
                     if images:
-                        found_images = images
-                        print(f"   [Found!] {len(found_images)} images found at {url}")
-                        break
+                        # 🕵️‍♂️ กรองเอาเฉพาะภาพที่เป็น "gallery" (ไม่เอาภาพส่วนกลาง)
+                        gallery_images = [img for img in images if img.get("tag") == "gallery"]
+                        
+                        if gallery_images:
+                            found_images = gallery_images
+                            print(f"   [Found!] {len(found_images)} gallery images found at {url}")
+                            break
+                        else:
+                            print(f"   [Filtered] Found images at {url} but NONE with 'gallery' tag.")
             except Exception as e:
                 print(f"   Error at {url}: {e}")
                 

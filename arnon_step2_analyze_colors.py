@@ -13,6 +13,10 @@ from src.services.api_service import APIService
 
 load_dotenv()
 
+# 🎯 [CONFIG] ระบุช่วงของ Property ID ที่ต้องการวิเคราะห์สี
+START_ID = 428
+END_ID = 428
+
 class PropertyAnalysis(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra='ignore')
     architect_style: str = Field(description="Dominant Architectural or Interior style: Modern, Nordic, Contemporary, Minimalist, Loft, Luxury, Other")
@@ -47,23 +51,23 @@ def analyze_arnon_properties():
     client = genai.Client(api_key=api_key)
     fs = FirestoreService()
     
-    # Login Arnon
-    arnon_email = os.getenv('AGENT_ARNON_EMAIL')
-    arnon_pass = os.getenv('AGENT_ARNON_PASSWORD')
-    api = APIService(email=arnon_email, password=arnon_pass)
+    # 🚀 ปล่อยให้ APIService เลือก Email/Password จาก .env เองตามลำดับความสำคัญ
+    api = APIService()
     api.authenticate()
     
     # ดึงทั้งหมด (Analyzed ทั้ง True และ False) มาดามใหม่ด้วย Flash ตัวเต็ม
-    docs = list(fs.db.collection("ARNON_properties").stream())
+    # เริ่มวิเคราะห์ในช่วง ID ที่กำหนดไว้ (START_ID ถึง END_ID)
+    print(f" เริ่มวิเคราะห์ 'ช่วงที่กำหนด' (IDs: {START_ID} - {END_ID})...")
     
-    if not docs:
-        print(" ไม่มีข้อมูลในระบบเลยครับ!")
-        return
-
-    print(f" เริ่มวิเคราห์ 'ทั้งหมด' (Re-processing): {len(docs)} properties...")
-
-    for doc in docs:
-        prop_id = doc.id
+    for pid in range(START_ID, END_ID + 1):
+        prop_id = str(pid)
+        doc_ref = fs.db.collection("ARNON_properties").document(prop_id)
+        doc = doc_ref.get()
+        
+        if not doc.exists:
+            print(f"⚠️ Skip {prop_id}: ไม่พบข้อมูลใน Firestore (ต้องรัน Step 1 ก่อน)")
+            continue
+            
         data = doc.to_dict()
         images_info = data.get("images", [])
         
