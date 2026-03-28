@@ -1,14 +1,13 @@
 import os
 import time
 from dotenv import load_dotenv
+from google.cloud.firestore_v1.base_query import FieldFilter
 from src.services.firestore_service import FirestoreService
 from src.services.api_service import APIService
 
 load_dotenv()
 
-# 🎯 [CONFIG] ระบุช่วงของ Property ID ที่ต้องการอัปโหลดข้อมูลสีเข้าระบบ Staff
-START_ID = 428
-END_ID = 428
+# ไม่ต้องระบุ START_ID/END_ID เครื่องจะดึงคิวงานจาก Firestore อัตโนมัติ (analyzed=True, uploaded=False)
 
 # Predefined 14 colors in Thai
 THAI_COLORS = [
@@ -26,23 +25,13 @@ def upload_arnon_analysis():
         print("Staff Authentication failed. Please check STAFF_API_EMAIL in .env")
         return
 
-    print(f"Starting upload for IDs: {START_ID} ถึง {END_ID}...")
+    print("🚀 สแกนหาคิวงานอัปโหลดจาก 'Launch_Properties' (analyzed=True, uploaded=False)...")
+    
+    docs = fs.db.collection("Launch_Properties").where(filter=FieldFilter("analyzed", "==", True)).where(filter=FieldFilter("uploaded", "==", False)).get()
 
-    for pid in range(START_ID, END_ID + 1):
-        prop_id = str(pid)
-        doc_ref = fs.db.collection("ARNON_properties").document(prop_id)
-        doc = doc_ref.get()
-        
-        if not doc.exists:
-            print(f"⚠️ Skip {prop_id}: ไม่พบข้อมูลใน Firestore (ต้องรัน Step 1/2 ก่อน)")
-            continue
-            
+    for doc in docs:
+        prop_id = doc.id
         data = doc.to_dict()
-        
-        # กรองเอาเฉพาะตัวที่วิเคราะห์แล้ว
-        if not data.get("analyzed"):
-            print(f"⚠️ Skip {prop_id}: ยังไม่ได้วิเคราะห์สี (Analyzed=False)")
-            continue
         
         # 1. Expand element_furniture from flattened string to List[List[str]]
         raw_furniture = data.get("element_furniture", [])
@@ -76,11 +65,11 @@ def upload_arnon_analysis():
         }
         
         if api.submit_color_analysis(payload):
-            fs.db.collection("ARNON_properties").document(prop_id).update({
+            fs.db.collection("Launch_Properties").document(prop_id).update({
                 "uploaded": True,
                 "uploaded_at": time.time()
             })
-            print(f"Property {prop_id} Uploaded.")
+            print(f"✅ Property {prop_id} Uploaded Successfully.")
         else:
             print(f"Failed to upload property {prop_id}.")
         

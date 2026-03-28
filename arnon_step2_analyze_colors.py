@@ -8,18 +8,17 @@ from google.genai import types
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List
 from dotenv import load_dotenv
+from google.cloud.firestore_v1.base_query import FieldFilter
 from src.services.firestore_service import FirestoreService
 from src.services.api_service import APIService
 
 load_dotenv()
 
-# 🎯 [CONFIG] ระบุช่วงของ Property ID ที่ต้องการวิเคราะห์สี
-START_ID = 428
-END_ID = 428
+# ไม่ต้องระบุ START_ID/END_ID แล้ว เพราะจะดึงจาก Firestore โดยตรง
 
 class PropertyAnalysis(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra='ignore')
-    architect_style: str = Field(description="Dominant Architectural or Interior style: Modern, Nordic, Contemporary, Minimalist, Loft, Luxury, Other")
+    architect_style: str = Field(description="Strictly ONE of: Modern, Nordic, Contemporary, Minimalist, Loft, Luxury, Other. If Condo, use Interior Style. If House, use Exterior Architect Style.")
     room_color: List[int] = Field(description="Aggregated 14-color percentage for Walls and Doors in order: [Green, Brown, Red, Dark Yellow, Orange, Purple, Pink, Light Yellow, Yellowish Brown, Light Brown, White, Gray, Blue, Black]")
     element_color: List[int] = Field(description="Aggregated 14-color percentage for Furniture in the same order.")
     element_furniture: List[str] = Field(description="List of 14 strings. Each string 'i' contains comma-separated English names of furniture items in that exact color 'i'. If empty, use \"\". Max 10 items per color.")
@@ -55,19 +54,12 @@ def analyze_arnon_properties():
     api = APIService()
     api.authenticate()
     
-    # ดึงทั้งหมด (Analyzed ทั้ง True และ False) มาดามใหม่ด้วย Flash ตัวเต็ม
-    # เริ่มวิเคราะห์ในช่วง ID ที่กำหนดไว้ (START_ID ถึง END_ID)
-    print(f" เริ่มวิเคราะห์ 'ช่วงที่กำหนด' (IDs: {START_ID} - {END_ID})...")
+    # ดึงทั้งหมดจาก Launch_Properties ที่ยังไม่ได้ analyzed (analyzed == False)
+    print("🚀 เริ่มดึงข้อมูลคิวงานวิเคราะห์สีจาก 'Launch_Properties' (analyzed=False)...")
+    docs = fs.db.collection("Launch_Properties").where(filter=FieldFilter("analyzed", "==", False)).get()
     
-    for pid in range(START_ID, END_ID + 1):
-        prop_id = str(pid)
-        doc_ref = fs.db.collection("ARNON_properties").document(prop_id)
-        doc = doc_ref.get()
-        
-        if not doc.exists:
-            print(f"⚠️ Skip {prop_id}: ไม่พบข้อมูลใน Firestore (ต้องรัน Step 1 ก่อน)")
-            continue
-            
+    for doc in docs:
+        prop_id = doc.id
         data = doc.to_dict()
         images_info = data.get("images", [])
         
@@ -105,17 +97,41 @@ def analyze_arnon_properties():
 
         print(f"🎬 Analyzing Property {prop_id} with {len(pil_images)} images...")
 
+        # ดึง Property Type จาก Agent API สดๆ
+        headers = api._get_auth_headers()
+        base_url = api.base_url.rstrip('/')
+        prop_type_name = "Unknown"
+        is_condo = False
+        
+        try:
+            r_detail = requests.get(f"{base_url}/api/agent/properties/{prop_id}", headers=headers, timeout=10)
+            if r_detail.status_code == 200:
+                p_data = r_detail.json().get("data", {})
+                prop_type_name = str(p_data.get("property_type", {}).get("name", "")).strip()
+                if "condo" in prop_type_name.lower() or "apartment" in prop_type_name.lower():
+                    is_condo = True
+        except Exception as e:
+            print(f"      [!] Failed to check property_type: {e}")
+
+        # ปรับกติกาย่อย (Dynamic Style Criteria)
+        if is_condo:
+            style_instruction = "This is a CONDO/APARTMENT. Identify the INTERIOR DECORATION style based on the room arrangement and furniture."
+        else:
+            style_instruction = f"This is a {prop_type_name or 'HOUSE/BUILDING'}. Identify the ARCHITECTURAL exterior style based on the building shape and structure."
+
         prompt = (
             "Analyze these images of a SINGLE property to summarize its characteristics. "
-            "1. Identify the AGGREGATED Architectural or Interior Style: Modern, Nordic, Contemporary, Minimalist, Loft, Luxury, Other.\n"
-            "2. 'room_color': Aggregate percentage (0-100) for Walls and Doors surfaces.\n"
-            "3. 'element_color': Aggregate percentage (0-100) for Furniture surface area.\n"
-            "4. Color order (14 colors): [0:Green, 1:Brown, 2:Red, 3:Dark Yellow, 4:Orange, 5:Purple, 6:Pink, 7:Light Yellow, 8:Yellowish Brown, 9:Light Brown, 10:White, 11:Gray, 12:Blue, 13:Black].\n"
-            "5. Both color arrays must be exactly 14 integers summing to exactly 100.\n"
-            "6. 'element_furniture': Array of exactly 14 STRINGS. Each string 'i' contains unique comma-separated furniture names in that color 'i'.\n"
-            "7. STRICTLY EXCLUDE all electrical appliances (AC, washing machines, refrigerators, TVs, microwaves, etc.).\n"
-            "8. COHERENCE RULE (CRITICAL): If 'element_furniture[i]' is NOT empty, 'element_color[i]' MUST be > 0. If 'element_color[i]' is 0, 'element_furniture[i]' MUST be \"\".\n"
-            "9. NO REPETITION & LIMIT: List at most 10 unique items per color string. DO NOT repeat the same word (e.g., 'cabinet, cabinet' is FORBIDDEN). Use plural plural (e.g., 'chairs') instead of repeating."
+            "IMPORTANT: Images show the same rooms and furniture from DIFFERENT angles. DO NOT double-count items. "
+            "1. Mental Mapping: Build a mental spatial map of the property. Identify unique furniture items (e.g., if you see the same blue bed in 3 photos, it counts as ONE blue bed).\n"
+            f"2. {style_instruction} You MUST choose EXACTLY ONE from this list: Modern, Nordic, Contemporary, Minimalist, Loft, Luxury, Other.\n"
+            "3. 'room_color': Aggregate percentage (0-100) for Walls and Doors surfaces based on the estimated total surface area of the entire property.\n"
+            "4. 'element_color': Aggregate percentage (0-100) for Furniture surface area. Deduplicate objects across images to prevent color inflation.\n"
+            "5. Color order (14 colors): [0:Green, 1:Brown, 2:Red, 3:Dark Yellow, 4:Orange, 5:Purple, 6:Pink, 7:Light Yellow, 8:Yellowish Brown, 9:Light Brown, 10:White, 11:Gray, 12:Blue, 13:Black].\n"
+            "6. Both color arrays must be exactly 14 integers summing to exactly 100.\n"
+            "7. 'element_furniture': Array of exactly 14 STRINGS. Each string 'i' contains unique comma-separated furniture names in that color 'i'.\n"
+            "8. STRICTLY EXCLUDE all electrical appliances (AC, washing machines, refrigerators, TVs, microwaves, etc.).\n"
+            "9. COHERENCE RULE (CRITICAL): If 'element_furniture[i]' is NOT empty, 'element_color[i]' MUST be > 0. If 'element_color[i]' is 0, 'element_furniture[i]' MUST be \"\".\n"
+            "10. NO REPETITION & LIMIT: List at most 10 unique items per color string. DO NOT repeat the same word. Use plural (e.g., 'chairs') instead of repeating same text."
         )
         
         # --- Gemini Analysis with Retry Logic ---
@@ -137,7 +153,7 @@ def analyze_arnon_properties():
                 res = response.parsed
                 
                 # บันทึกผลลัพธ์ที่ระดับ Property
-                fs.db.collection("ARNON_properties").document(prop_id).update({
+                fs.db.collection("Launch_Properties").document(prop_id).update({
                     "architect_style": res.architect_style,
                     "room_color": res.room_color,
                     "element_color": res.element_color,
