@@ -1,10 +1,13 @@
 import os
 import time
 from dotenv import load_dotenv
+from google.cloud.firestore_v1.base_query import FieldFilter
 from src.services.firestore_service import FirestoreService
 from src.services.api_service import APIService
 
 load_dotenv()
+
+# ไม่ต้องระบุ START_ID/END_ID เครื่องจะดึงคิวงานจาก Firestore อัตโนมัติ (analyzed=True, uploaded=False)
 
 # Predefined 14 colors in Thai
 THAI_COLORS = [
@@ -15,28 +18,16 @@ THAI_COLORS = [
 def upload_arnon_analysis():
     fs = FirestoreService()
     
-    # Login as Staff
-    staff_email = os.getenv('AGENT_ARNON_EMAIL')
-    staff_pass = os.getenv('AGENT_ARNON_PASSWORD')
-    api = APIService(email=staff_email, password=staff_pass)
+    # 🚀 ปล่อยให้ APIService เลือก Email/Password ฝั่ง Staff จาก .env เองอัตโนมัติ
+    api = APIService()
     
     if not api.authenticate_staff():
-        print("Staff Authentication failed.")
+        print("Staff Authentication failed. Please check STAFF_API_EMAIL in .env")
         return
 
-    from google.cloud.firestore_v1.base_query import FieldFilter
-    # Fetch properties that are analyzed but not yet uploaded
-    docs = list(fs.db.collection("ARNON_properties")
-                .where(filter=FieldFilter("analyzed", "==", True))
-                .where(filter=FieldFilter("uploaded", "==", False))
-                .limit(500) 
-                .stream())
+    print("🚀 สแกนหาคิวงานอัปโหลดจาก 'Launch_Properties' (analyzed=True, uploaded=False)...")
     
-    if not docs:
-        print("All analyzed properties have been uploaded.")
-        return
-
-    print(f"Starting upload for {len(docs)} properties to Staff API...")
+    docs = fs.db.collection("Launch_Properties").where(filter=FieldFilter("analyzed", "==", True)).where(filter=FieldFilter("uploaded", "==", False)).get()
 
     for doc in docs:
         prop_id = doc.id
@@ -58,8 +49,12 @@ def upload_arnon_analysis():
         dominant_color_thai = THAI_COLORS[max_idx]
 
         # 3. Construct Payload based on Staff API spec
+        from datetime import datetime
+        now_iso = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+
         payload = {
             "property_id": int(prop_id),
+            "analyzed_at": now_iso, # 🕒 เพิ่มเวลาที่วิเคราะห์จริง
             "average_color_hex": "#FFFFFF", 
             "color": dominant_color_thai,
             "room_color": data.get("room_color"),
@@ -70,11 +65,11 @@ def upload_arnon_analysis():
         }
         
         if api.submit_color_analysis(payload):
-            fs.db.collection("ARNON_properties").document(prop_id).update({
+            fs.db.collection("Launch_Properties").document(prop_id).update({
                 "uploaded": True,
                 "uploaded_at": time.time()
             })
-            print(f"Property {prop_id} Uploaded.")
+            print(f"✅ Property {prop_id} Uploaded Successfully.")
         else:
             print(f"Failed to upload property {prop_id}.")
         

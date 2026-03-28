@@ -154,12 +154,28 @@ def run_sync_new_sheet(target_arg=None):
         elif arg_lower == "limit" and len(sys.argv) > 2:
             mode = "limit"
             limit_count = int(sys.argv[2])
+        elif arg_lower == "activities":
+            mode = "activities"
         elif len(sys.argv) > 2:
             mode = "range"
             start_id, end_id = int(sys.argv[1]), int(sys.argv[2])
         else: mode = "single"
 
-    print(f"🚀 เริ่มต้นการ Sync ข้อมูล (Mode: {mode}, Target: {target_arg})...")
+    target_zone = None
+    if len(sys.argv) > 3:
+        target_zone = sys.argv[3]
+    elif len(sys.argv) > 2:
+        # 🧠 [Smart Argument Detection] 
+        # ถ้าพารามิเตอร์ที่ 2 ไม่ใช่ตัวเลข (ID) และบอสกำลังใช้โหมด all หรือ activities
+        # ให้เดาว่าบอสกำลังใส่ "ชื่อโซน" มาให้เลยครับ
+        arg2 = sys.argv[2]
+        if mode in ["all", "activities"] and not arg2.isdigit():
+            target_zone = arg2
+            target_arg = "all" # เพื่อให้ FETCH LOGIC ทำงานได้ถูกต้อง
+        elif len(sys.argv) > 3:
+            target_zone = sys.argv[3]
+
+    print(f"🚀 เริ่มต้นการ Sync ข้อมูล (Mode: {mode}, Target: {target_arg}, Zone Filter: {target_zone or 'None'})...")
     if not api.authenticate(): return
 
     # --- FETCH LOGIC ---
@@ -212,12 +228,24 @@ def run_sync_new_sheet(target_arg=None):
                 target_items.append(d)
         print(f"🎯 พบรายการที่ขาดพิกัดทั้งหมด: {len(target_items)} รายการ")
     elif mode == "all":
-        print("🌍 Fetching ALL properties from Firestore...")
-        target_items = list(fs.db.collection(fs.collection_name).stream())
+        print(f"🌍 Fetching {'Zone: ' + target_zone if target_zone else 'ALL'} properties from Firestore...")
+        if target_zone:
+            target_items = list(fs.db.collection(fs.collection_name).where("zone", "==", target_zone).stream())
+        else:
+            target_items = list(fs.db.collection(fs.collection_name).stream())
         target_items.sort(key=lambda x: int(x.to_dict().get("api_property_id") or 999999))
     elif mode == "range":
         all_stream = fs.db.collection(fs.collection_name).stream()
         target_items = [doc for doc in all_stream if start_id <= int(doc.to_dict().get("api_property_id", 0)) <= end_id]
+        target_items.sort(key=lambda x: int(x.to_dict().get("api_property_id") or 999999))
+    elif mode == "activities":
+        print(f"🎭 โหมด Activities: กำลังกวาดรายการ {'ในโซน ' + target_zone if target_zone else ''} ที่มี ID ทั้งหมดเพื่ออัปเดต Status ใหม่...")
+        # ดึงรายการที่มี ID อยู่แล้ว โดยกรองโซนได้ถ้าบอสสั่งมา
+        base_query = fs.db.collection(fs.collection_name).where("api_property_id", "!=", None)
+        if target_zone:
+            base_query = base_query.where("zone", "==", target_zone)
+        
+        target_items = list(base_query.stream())
         target_items.sort(key=lambda x: int(x.to_dict().get("api_property_id") or 999999))
     else:
         query = fs.db.collection(fs.collection_name).where("is_new_sheet", "==", True).get()
@@ -254,6 +282,11 @@ def run_sync_new_sheet(target_arg=None):
         p_name = format_project_name_th_en(p_name)
         
         zone_v = clean(raw_data.get("zone", "-"))
+        
+        # 🛡️ [ZONE FILTER] ถ้ามีการกำหนดโซนเป้าหมาย ให้ข้ามรายการที่ไม่ตรงออกไป
+        if target_zone and zone_v != target_zone:
+            # print(f"   ⏭️ Skip {property_id}: Zone '{zone_v}' doesn't match target '{target_zone}'")
+            continue
         
         # กรองคำที่ไม่ใช่ชื่อโซนจริงๆ ออกไป
         if zone_v in ["all", "unsynced"]: zone_v = "-"
@@ -360,37 +393,106 @@ def run_sync_new_sheet(target_arg=None):
 
         api_success = False
         if property_id:
-            # 🕵️‍♂️ [API Direct Check] เช็คสถานะจริงจาก API ก่อนยิงทับ
+            # 🕵️‍♂️ [API Direct Check] เช็คสถานะจริงจาก API แบบเรียลไทม์ (ตามที่บอสสั่ง)
+            print(f"🔍 Checking Status for {property_id} on API...")
             p_status_info = api.get_property_status(property_id)
-            if p_status_info:
-                # 🛡️ พยายามดึง approval_status ออกมาอย่างปลอดภัย (รองรับทั้ง Dict และ String)
-                app_status = ""
-                if isinstance(p_status_info, dict):
-                    app_status = str(p_status_info.get("approval_status", "")).lower()
-                elif isinstance(p_status_info, str):
-                    app_status = p_status_info.lower()
-                    
-                if "approve" in app_status:
-                    print(f"   ⏭️ Skip {property_id}: Already Approved on API (Status: {app_status})")
-                    skipped_count += 1
-                    # ไม่บันทึก 'approved' กลับ Firestore ตามที่บอสสั่ง
-                    continue
             
-            api_success = api.update_property(property_id, payload)
+            # 🛡️ แปรรูปสถานะให้เป็นตัวเลือกที่ชัดเจน (รองรับค่าว่างหรือ None)
+            app_status = str(p_status_info or "").strip().lower()
+            print(f"   📥 API Status Result: '{app_status}' (from /status endpoint)")
+            
+            if "approve" in app_status:
+                print(f"   ⏭️ Skip {property_id}: Already Approved on API (Confirmed by GET /status)")
+                skipped_count += 1
+                # อัปเดตสถานะใน Firestore ให้ตรงกันด้วย จะได้ไม่หลุดมาในลูปหน้า
+                fs.db.collection(fs.collection_name).document(listing_id).update({
+                    "is_new_sheet": False,
+                    "api_synced": True,
+                    "is_approved": True
+                })
+                continue
+            
+            # [NEW] ถ้าเป็นโหมด activities ให้ข้ามการอัปเดตข้อมูลทรัพย์ไปเลย
+            if mode == "activities":
+                print(f"   ⚡ Mode Activities: Skipping property update, proceeding to Activity Log...")
+                api_success = True 
+            else:
+                api_success = api.update_property(property_id, payload)
         else:
+            # รายการใหม่ยังไงก็ต้องสร้างก่อนถึงจะยิง Activity ได้
             new_id = api.create_property(payload)
-            if new_id: property_id = new_id; fs.db.collection(fs.collection_name).document(listing_id).update({"api_property_id": property_id}); api_success = True
+            if new_id: 
+                property_id = new_id
+                fs.db.collection(fs.collection_name).document(listing_id).update({"api_property_id": property_id})
+                api_success = True
 
         if api_success:
-            print(f"✅ Sync {property_id} Success (Color: {h_color}, Floor: {floor_v})")
+            if mode == "activities":
+                print(f"✅ Activity Sync {property_id} Success (Processing Logs...)")
+            else:
+                print(f"✅ Sync {property_id} Success (Color: {h_color}, Floor: {floor_v})")
+            
             success_count += 1
             
+            # 📋 [NEW] ACTIVITY LOGGING WORKFLOW
+            # ดึงข้อมูลกิจกรรมจาก Sheet
+            sheet_call_status = clean(raw_data.get("sheet_สถานะการโทร"), "").strip()
+            sheet_remark = clean(raw_data.get("sheet_Remark"), "").strip()
+            sheet_feedback = clean(raw_data.get("sheet_Feedback"), "").strip()
+            sheet_call_date = clean(raw_data.get("sheet_วันที่โทร"), "").strip()
+            
+            # รวม Remark และ Feedback เข้าด้วยกัน
+            combined_notes = f"{sheet_remark} {sheet_feedback}".strip() or "-"
+            
+            if sheet_call_status:
+                activity_payload = {}
+                status_lower = sheet_call_status.lower()
+                
+                # ตัดสินใจประเภท Activity
+                if any(x in status_lower for x in ["ตกลง", "ยอมรับ", "accept"]):
+                    activity_payload = {
+                        "type": "accept",
+                        "reason": combined_notes,
+                        "notes": "บันทึกอัตโนมัติจาก Sheet"
+                    }
+                elif any(x in status_lower for x in ["ปฏิเสธ", "ไม่สนใจ", "deny", "ไม่รับ"]):
+                    activity_payload = {
+                        "type": "deny",
+                        "reason": combined_notes,
+                        "notes": "บันทึกอัตโนมัติจาก Sheet"
+                    }
+                else:
+                    # กรณีเป็น Call Log ปกติ
+                    # แมพค่า call_outcome ให้ตรงกับที่ API คาดหวัง (reached, no_answer, etc.)
+                    outcome = "reached"
+                    if any(x in status_lower for x in ["ไม่รับ", "ฝากข้อความ", "no answer"]): outcome = "no_answer"
+                    elif "โทรใหม่" in status_lower: outcome = "callback_later"
+                    elif "เบอร์ผิด" in status_lower: outcome = "wrong_number"
+                    
+                    activity_payload = {
+                        "type": "call",
+                        "call_outcome": outcome,
+                        "notes": f"[{sheet_call_status}] {combined_notes}"
+                    }
+                
+                # ถ้ามีวันที่ระบุใน Sheet ให้ใส่ไปด้วย
+                if sheet_call_date and sheet_call_date != "-":
+                    activity_payload["occurred_at"] = sheet_call_date
+                
+                # ยิง Activity เข้า API
+                api.create_activity(property_id, activity_payload)
+            
             # --- [NEW] 1. บันทึก 'color' กลับไปใน Leads (เฉพาะ Color เพื่อความคลีน)
-            fs.db.collection(fs.collection_name).document(listing_id).update({
+            # --- [NEW] 1. บันทึกสถานะกลับไปใน Leads
+            update_fields = {
                 "is_new_sheet": False, 
-                "api_synced": True,
-                "color": h_color 
-            })
+                "api_synced": True
+            }
+            # 🎨 ถ้าไม่ใช่โหมด activities ให้บันทึกสีลง Firestore ด้วย
+            if mode != "activities":
+                update_fields["color"] = h_color
+                
+            fs.db.collection(fs.collection_name).document(listing_id).update(update_fields)
             
             # --- [NEW] 2. เก็บ Cache ข้อมูลเข้าตะกร้าใหม่ใน Firestore (ไม่ปนกับ Leads)
             # สร้าง Collection ชื่อ 'API_Cache' เพื่อเก็บ Log & Payload ชุดเต็ม
