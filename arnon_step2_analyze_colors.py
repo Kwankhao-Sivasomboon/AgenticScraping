@@ -54,11 +54,20 @@ def analyze_arnon_properties():
     api = APIService()
     api.authenticate()
     
-    # ดึงทั้งหมดจาก Launch_Properties ที่ยังไม่ได้ analyzed (analyzed == False)
-    print("🚀 เริ่มดึงข้อมูลคิวงานวิเคราะห์สีจาก 'Launch_Properties' (analyzed=False)...")
-    docs = fs.db.collection("Launch_Properties").where(filter=FieldFilter("analyzed", "==", False)).get()
+    # ดึงทั้งหมดที่ยังไม่ได้วิเคราะห์ (analyzed == False) หรือยังไม่มีฟิลด์ analyzed เลย
+    print("🚀 เริ่มดึงข้อมูลคิวงานวิเคราะห์สีจาก 'Launch_Properties' (analyzed=False/None)...")
+    docs = fs.db.collection("Launch_Properties").get()
     
+    tasks = []
     for doc in docs:
+        d = doc.to_dict()
+        # 🔥 งานที่ต้องทำคือ analyzed เป็น False หรือเป็น None (ยังไม่เคยมีผลสี)
+        if not d.get("analyzed") and not d.get("room_color"):
+             tasks.append(doc)
+    
+    print(f"📊 Found {len(tasks)} tasks to analyze.")
+    
+    for doc in tasks:
         prop_id = doc.id
         data = doc.to_dict()
         images_info = data.get("images", [])

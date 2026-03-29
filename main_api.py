@@ -128,14 +128,16 @@ def process_property_analysis(property_id: int):
     logger.info(f"🎬 Analyzing Property {property_id} with {len(pil_images)} images via Gemini...")
     prompt = (
         "Analyze these images of a SINGLE property to summarize its characteristics. "
-        "1. Identify the AGGREGATED Architectural or Interior Style: Modern, Nordic, Contemporary, Minimalist, Loft, Luxury, Other.\n"
-        "2. 'room_color': Aggregate percentage (0-100) for Walls and Doors surfaces.\n"
-        "3. 'element_color': Aggregate percentage (0-100) for Furniture surface area.\n"
-        "4. Exact 14 Color order: [Green, Brown, Red, Dark Yellow, Orange, Purple, Pink, Light Yellow, Yellowish Brown, Light Brown, White, Gray, Blue, Black].\n"
-        "5. Both color arrays must be exactly 14 integers summing to exactly 100.\n"
-        "6. 'element_furniture': Array of exactly 14 STRINGS. comma-separated furniture names in that color. Exclude electrical appliances.\n"
-        "7. COHERENCE RULE: If 'element_furniture[i]' is NOT empty, 'element_color[i]' MUST be > 0. If 'element_color[i]' is 0, 'element_furniture[i]' MUST be \"\".\n"
-        "8. NO REPETITION & LIMIT: Max 10 items per color string. Do not repeat words."
+        "IMPORTANT: Images show the same rooms and furniture from DIFFERENT angles. DO NOT double-count items. "
+        "1. Mental Mapping: Build a mental spatial map of the property. Identify unique furniture items (e.g., if you see the same blue bed in 3 photos, it counts as ONE blue bed).\n"
+        "2. Identify the AGGREGATED Architectural or Interior Style: Modern, Nordic, Contemporary, Minimalist, Loft, Luxury, Other.\n"
+        "3. 'room_color': Aggregate percentage (0-100) for Walls and Doors surfaces based on the estimated total surface area. STRICTLY EXCLUDE Floor colors (do NOT include floor tiles, wood floors, carpets, etc.).\n"
+        "4. 'element_color': Aggregate percentage (0-100) for Furniture surface area. Deduplicate objects across images to prevent color inflation.\n"
+        "5. Exact 14 Color order: [Green, Brown, Red, Dark Yellow, Orange, Purple, Pink, Light Yellow, Yellowish Brown, Light Brown, White, Gray, Blue, Black].\n"
+        "6. Both color arrays must be exactly 14 integers summing to exactly 100.\n"
+        "7. 'element_furniture': Array of exactly 14 STRINGS. comma-separated furniture names in that color. STRICTLY EXCLUDE electrical appliances (AC, TVs, fridges).\n"
+        "8. COHERENCE RULE (CRITICAL): If 'element_furniture[i]' is NOT empty, 'element_color[i]' MUST be > 0. If 'element_color[i]' is 0, 'element_furniture[i]' MUST be \"\".\n"
+        "9. NO REPETITION & LIMIT: Max 10 unique items per color string. Do not repeat the same word. Use plural (e.g., 'chairs')."
     )
     
     contents = [prompt] + pil_images
