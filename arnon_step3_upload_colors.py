@@ -49,8 +49,10 @@ def upload_arnon_analysis():
         dominant_color_thai = THAI_COLORS[max_idx]
 
         # 3. Construct Payload based on Staff API spec
-        from datetime import datetime
-        now_iso = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+        from datetime import datetime, timedelta
+        # 🕒 ปรับให้เป็นเวลาไทย (UTC+7) เพื่อให้ Staff API แสดงผล "Just Now"
+        now_thailand = datetime.utcnow() + timedelta(hours=7)
+        now_iso = now_thailand.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
 
         payload = {
             "property_id": int(prop_id),

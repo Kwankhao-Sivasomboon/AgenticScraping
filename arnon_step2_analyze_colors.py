@@ -54,11 +54,20 @@ def analyze_arnon_properties():
     api = APIService()
     api.authenticate()
     
-    # ดึงทั้งหมดจาก Launch_Properties ที่ยังไม่ได้ analyzed (analyzed == False)
-    print("🚀 เริ่มดึงข้อมูลคิวงานวิเคราะห์สีจาก 'Launch_Properties' (analyzed=False)...")
-    docs = fs.db.collection("Launch_Properties").where(filter=FieldFilter("analyzed", "==", False)).get()
+    # ดึงทั้งหมดที่ยังไม่ได้วิเคราะห์ (analyzed == False) หรือยังไม่มีฟิลด์ analyzed เลย
+    print("🚀 เริ่มดึงข้อมูลคิวงานวิเคราะห์สีจาก 'Launch_Properties' (analyzed=False/None)...")
+    docs = fs.db.collection("Launch_Properties").get()
     
+    tasks = []
     for doc in docs:
+        d = doc.to_dict()
+        # 🔥 งานที่ต้องทำคือ analyzed เป็น False หรือเป็น None (ยังไม่เคยมีผลสี)
+        if not d.get("analyzed") and not d.get("room_color"):
+             tasks.append(doc)
+    
+    print(f"📊 Found {len(tasks)} tasks to analyze.")
+    
+    for doc in tasks:
         prop_id = doc.id
         data = doc.to_dict()
         images_info = data.get("images", [])
@@ -67,8 +76,15 @@ def analyze_arnon_properties():
             print(f"⚠️ Skip {prop_id}: ไม่มีข้อมูลรูปภาพ")
             continue
 
+        # 🕵️‍♂️ กรองเอาเฉพาะภาพที่มี tag เป็น "gallery"
+        gallery_images = [img for img in images_info if img.get("tag") == "gallery"]
+        
+        if not gallery_images:
+            print(f"⚠️ Skip {prop_id}: ไม่มีภาพ gallery ให้วิเคราะห์")
+            continue
+
         # 🔄 Refresh URLs (Batch)
-        img_ids = [img.get("id") for img in images_info if img.get("id")]
+        img_ids = [img.get("id") for img in gallery_images if img.get("id")]
         print(f"🔄 Refreshing Signed URLs for {len(img_ids)} images...")
         refreshed = api.refresh_photo_urls(img_ids)
         
@@ -85,7 +101,7 @@ def analyze_arnon_properties():
             
         # 📸 ดาวน์โหลดรูปทื่ Refresh แล้ว (จำกัดแค่ 15 รูปทิเด่นๆ)
         pil_images = []
-        for img_meta in images_info[:15]:
+        for img_meta in gallery_images[:15]:
             img_url = url_map.get(str(img_meta.get("id"))) or img_meta.get("url")
             pil_img = download_image(img_url)
             if pil_img:
@@ -152,6 +168,9 @@ def analyze_arnon_properties():
                 )
                 res = response.parsed
                 
+                from datetime import datetime, timedelta
+                now_iso = (datetime.utcnow() + timedelta(hours=7)).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+                
                 # บันทึกผลลัพธ์ที่ระดับ Property
                 fs.db.collection("Launch_Properties").document(prop_id).update({
                     "architect_style": res.architect_style,
@@ -159,6 +178,7 @@ def analyze_arnon_properties():
                     "element_color": res.element_color,
                     "element_furniture": res.element_furniture,
                     "analyzed": True,
+                    "analyzed_at": now_iso, # 🕒 บันทึกเวลาไทยลง Firestore
                     "uploaded": False,
                     "images_analyzed": len(pil_images)
                 })

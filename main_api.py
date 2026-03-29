@@ -7,7 +7,6 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 
 from src.services.api_service import APIService
-from src.services.firestore_service import FirestoreService
 
 # Gemini Imports
 from google import genai
@@ -105,7 +104,7 @@ def process_property_analysis(property_id: int):
         from PIL import Image
         from io import BytesIO
         
-        for img_meta in images_info[:15]:  # Limit 15 ภาพเพื่อประหยัด Token/เวลา
+        for img_meta in gallery_images[:15]:  # Limit 15 ภาพเพื่อประหยัด Token/เวลา
             img_url = url_map.get(str(img_meta.get("id"))) or img_meta.get("url")
             try:
                 r_img = requests.get(img_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
@@ -128,14 +127,16 @@ def process_property_analysis(property_id: int):
     logger.info(f"🎬 Analyzing Property {property_id} with {len(pil_images)} images via Gemini...")
     prompt = (
         "Analyze these images of a SINGLE property to summarize its characteristics. "
-        "1. Identify the AGGREGATED Architectural or Interior Style: Modern, Nordic, Contemporary, Minimalist, Loft, Luxury, Other.\n"
-        "2. 'room_color': Aggregate percentage (0-100) for Walls and Doors surfaces.\n"
-        "3. 'element_color': Aggregate percentage (0-100) for Furniture surface area.\n"
-        "4. Exact 14 Color order: [Green, Brown, Red, Dark Yellow, Orange, Purple, Pink, Light Yellow, Yellowish Brown, Light Brown, White, Gray, Blue, Black].\n"
-        "5. Both color arrays must be exactly 14 integers summing to exactly 100.\n"
-        "6. 'element_furniture': Array of exactly 14 STRINGS. comma-separated furniture names in that color. Exclude electrical appliances.\n"
-        "7. COHERENCE RULE: If 'element_furniture[i]' is NOT empty, 'element_color[i]' MUST be > 0. If 'element_color[i]' is 0, 'element_furniture[i]' MUST be \"\".\n"
-        "8. NO REPETITION & LIMIT: Max 10 items per color string. Do not repeat words."
+        "IMPORTANT: Images show the same rooms and furniture from DIFFERENT angles. DO NOT double-count items. "
+        "1. Mental Mapping: Build a mental spatial map of the property. Identify unique furniture items (e.g., if you see the same blue bed in 3 photos, it counts as ONE blue bed).\n"
+        "2. Identify the AGGREGATED Architectural or Interior Style: Modern, Nordic, Contemporary, Minimalist, Loft, Luxury, Other.\n"
+        "3. 'room_color': Aggregate percentage (0-100) for Walls and Doors surfaces based on the estimated total surface area. STRICTLY EXCLUDE Floor colors (do NOT include floor tiles, wood floors, carpets, etc.).\n"
+        "4. 'element_color': Aggregate percentage (0-100) for Furniture surface area. Deduplicate objects across images to prevent color inflation.\n"
+        "5. Exact 14 Color order: [Green, Brown, Red, Dark Yellow, Orange, Purple, Pink, Light Yellow, Yellowish Brown, Light Brown, White, Gray, Blue, Black].\n"
+        "6. Both color arrays must be exactly 14 integers summing to exactly 100.\n"
+        "7. 'element_furniture': Array of exactly 14 STRINGS. comma-separated furniture names in that color. STRICTLY EXCLUDE electrical appliances (AC, TVs, fridges).\n"
+        "8. COHERENCE RULE (CRITICAL): If 'element_furniture[i]' is NOT empty, 'element_color[i]' MUST be > 0. If 'element_color[i]' is 0, 'element_furniture[i]' MUST be \"\".\n"
+        "9. NO REPETITION & LIMIT: Max 10 unique items per color string. Do not repeat the same word. Use plural (e.g., 'chairs')."
     )
     
     contents = [prompt] + pil_images
@@ -170,8 +171,10 @@ def process_property_analysis(property_id: int):
         max_idx = element_colors.index(max(element_colors)) if any(element_colors) else 10
         dominant_color_thai = THAI_COLORS[max_idx]
         
-        from datetime import datetime
-        now_iso = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z' # 🕒 เวลาปัจจุบัน ISO Format
+        from datetime import datetime, timedelta
+        # 🕒 ปรับให้เป็นเวลาไทย (UTC+7) เพื่อให้ Staff API แสดงผล "Just Now"
+        now_thailand = datetime.utcnow() + timedelta(hours=7)
+        now_iso = now_thailand.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z' 
 
         struct_payload = {
             "property_id": int(property_id),
@@ -197,13 +200,13 @@ def process_property_analysis(property_id: int):
 @app.post("/api/analyze-property")
 async def trigger_property_analysis(req: AnalyzeRequest, background_tasks: BackgroundTasks):
     """
-    Endpoint สำหรับรับคำสั่งจาก Front-end/Back-end เมื่อ Agent ลงรูปเสร็จ
-    จะทำการตอบ 202 Accepted กลับไปทันที แล้วเอางานไปทำใน Background Task
+    Trigger AI Color and Style analysis for a specific Property ID.
+    Status: 202 Accepted (Background Task Initiated).
     """
     if not req.property_id:
         raise HTTPException(status_code=400, detail="property_id is required")
         
-    # โยนงานเข้า Queue อัตโนมัติ (FastAPI จะรัน Thread เบื้องหลังให้)
+    # Enqueue analysis task to run in background
     background_tasks.add_task(process_property_analysis, req.property_id)
     
     return {
