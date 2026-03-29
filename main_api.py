@@ -104,7 +104,7 @@ def process_property_analysis(property_id: int):
         from PIL import Image
         from io import BytesIO
         
-        for img_meta in images_info[:15]:  # Limit 15 ภาพเพื่อประหยัด Token/เวลา
+        for img_meta in gallery_images[:15]:  # Limit 15 ภาพเพื่อประหยัด Token/เวลา
             img_url = url_map.get(str(img_meta.get("id"))) or img_meta.get("url")
             try:
                 r_img = requests.get(img_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
@@ -171,8 +171,10 @@ def process_property_analysis(property_id: int):
         max_idx = element_colors.index(max(element_colors)) if any(element_colors) else 10
         dominant_color_thai = THAI_COLORS[max_idx]
         
-        from datetime import datetime
-        now_iso = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z' # 🕒 เวลาปัจจุบัน ISO Format
+        from datetime import datetime, timedelta
+        # 🕒 ปรับให้เป็นเวลาไทย (UTC+7) เพื่อให้ Staff API แสดงผล "Just Now"
+        now_thailand = datetime.utcnow() + timedelta(hours=7)
+        now_iso = now_thailand.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z' 
 
         struct_payload = {
             "property_id": int(property_id),
