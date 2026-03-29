@@ -43,3 +43,4 @@ docker-compose.override.yml
 searches_found.txt
 
 api_cache/
+GCPPowerShell_API.txt

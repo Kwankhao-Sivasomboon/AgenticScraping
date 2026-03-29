@@ -7,7 +7,6 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 
 from src.services.api_service import APIService
-from src.services.firestore_service import FirestoreService
 
 # Gemini Imports
 from google import genai
@@ -199,13 +198,13 @@ def process_property_analysis(property_id: int):
 @app.post("/api/analyze-property")
 async def trigger_property_analysis(req: AnalyzeRequest, background_tasks: BackgroundTasks):
     """
-    Endpoint สำหรับรับคำสั่งจาก Front-end/Back-end เมื่อ Agent ลงรูปเสร็จ
-    จะทำการตอบ 202 Accepted กลับไปทันที แล้วเอางานไปทำใน Background Task
+    Trigger AI Color and Style analysis for a specific Property ID.
+    Status: 202 Accepted (Background Task Initiated).
     """
     if not req.property_id:
         raise HTTPException(status_code=400, detail="property_id is required")
         
-    # โยนงานเข้า Queue อัตโนมัติ (FastAPI จะรัน Thread เบื้องหลังให้)
+    # Enqueue analysis task to run in background
     background_tasks.add_task(process_property_analysis, req.property_id)
     
     return {

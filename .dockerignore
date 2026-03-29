@@ -1,6 +1,8 @@
 .env*
 env.yaml
+*.json
 GCPPowerShell.txt
+GCPPowerShell_API.txt
 .DS_Store
 __pycache__/
 *.pyc

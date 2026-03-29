@@ -7,20 +7,30 @@ load_dotenv()
 
 class FirestoreService:
     def __init__(self):
-        """Initialize connection to Google Cloud Firestore using standard google-cloud library."""
-        self.credentials_file = os.getenv('GOOGLE_SERVICE_ACCOUNT_FILE', 'credentials.json')
+        """
+        Initialize connection to Google Cloud Firestore.
+        Supports both Local (Credentials File) and Cloud (ADC/IAM Role) environments.
+        """
+        self.credentials_file = os.getenv('GOOGLE_SERVICE_ACCOUNT_FILE')
         
         try:
-            # ใช้ google.cloud.firestore โดยตรงเพื่อรองรับ Name Database
-            cred = service_account.Credentials.from_service_account_file(self.credentials_file)
-            self.db = firestore.Client(
-                project=cred.project_id, 
-                credentials=cred, 
-                database='livinginsider-scraping'
-            )
+            database_id = 'livinginsider-scraping'
+            
+            # --- 🛠️ ท่าที่ 1: ตรวจเช็คว่ามีไฟล์ Key ในเครื่องไหม (Local Mode) ---
+            if self.credentials_file and os.path.exists(self.credentials_file):
+                print(f"🔐 Firestore: Using local credentials file: {self.credentials_file}")
+                cred = service_account.Credentials.from_service_account_file(self.credentials_file)
+                self.db = firestore.Client(project=cred.project_id, credentials=cred, database=database_id)
+            
+            # --- 🛰️ ท่าที่ 2: ใช้ IAM Role / Application Default Credentials (Cloud Mode) ---
+            else:
+                print("🛰️ Firestore: No local key found. Falling back to Application Default Credentials (IAM Role).")
+                # Firestore Client จะหา Project/Credential จากสถาพแวดล้อม GCP อัตโนมัติ (บน Cloud Run)
+                self.db = firestore.Client(database=database_id)
+                
             self.collection_name = 'Leads'
         except Exception as e:
-            print(f"Error initializing Firestore Client: {e}")
+            print(f"❌ Error initializing Firestore Client: {e}")
             self.db = None
 
     def is_listing_exists(self, listing_id):
