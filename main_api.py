@@ -76,8 +76,8 @@ def process_property_analysis(property_id: int):
         prop_data = res_json.get('data', res_json) 
         images_info = prop_data.get('images', [])
         
-        # 🕵️‍♂️ กรองเอาเฉพาะภาพที่มี tag เป็น "gallery" (ไม่เอาภาพส่วนกลาง/สิ่งอำนวยความสะดวก)
-        gallery_images = [img for img in images_info if img.get("tag") == "gallery"]
+        # 🕵️‍♂️ กรองเอาทุกภาพยกเว้นภาพที่เป็น "Common facilities" เพื่อให้ AI เห็นภาพห้องครบถ้วน
+        gallery_images = [img for img in images_info if img.get("tag") != "Common facilities"]
         
         if not gallery_images:
             logger.warning(f"⚠️ No 'gallery' images found for Property {property_id}. Full response: {res_json}")

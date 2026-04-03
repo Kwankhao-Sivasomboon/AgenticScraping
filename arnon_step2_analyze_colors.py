@@ -76,8 +76,8 @@ def analyze_arnon_properties():
             print(f"⚠️ Skip {prop_id}: ไม่มีข้อมูลรูปภาพ")
             continue
 
-        # 🕵️‍♂️ กรองเอาเฉพาะภาพที่มี tag เป็น "gallery"
-        gallery_images = [img for img in images_info if img.get("tag") == "gallery"]
+        # 🕵️‍♂️ กรองเอาทุกภาพยกเว้นภาพที่เป็น "Common facilities" เพื่อให้ AI เห็นห้องต่างๆ ครบถ้วน
+        gallery_images = [img for img in images_info if img.get("tag") != "Common facilities"]
         
         if not gallery_images:
             print(f"⚠️ Skip {prop_id}: ไม่มีภาพ gallery ให้วิเคราะห์")
