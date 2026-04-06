@@ -53,11 +53,7 @@ def process_property_analysis(property_id: int):
     api = APIService() # 🚀 ปล่อยให้ APIService เลือก Email/Password จาก .env เองตามลำดับความสำคัญ
     api.authenticate()
 
-    # 2. Get Property Status / Details (to verify it exists and get image count, optional but good for validation)
-    status = api.get_property_status(property_id)
-    logger.info(f"   Status for {property_id}: {status}")
-
-    # 3. Retrieve and Refresh Photo URLs
+    # 2. Retrieve and Refresh Photo URLs
     try:
         base = api.base_url.rstrip('/')
         if '/api' in base:
@@ -77,14 +73,14 @@ def process_property_analysis(property_id: int):
         images_info = prop_data.get('images', [])
         
         # 🕵️‍♂️ กรองเอาทุกภาพยกเว้นภาพที่เป็น "Common facilities" เพื่อให้ AI เห็นภาพห้องครบถ้วน
-        gallery_images = [img for img in images_info if img.get("tag") != "Common facilities"]
+        valid_images = [img for img in images_info if img.get("tag") != "Common facilities"]
         
-        if not gallery_images:
-            logger.warning(f"⚠️ No 'gallery' images found for Property {property_id}. Full response: {res_json}")
+        if not valid_images:
+            logger.warning(f"⚠️ No valid images found for Property {property_id} (All might be Common facilities). Full response: {res_json}")
             return
             
-        img_ids = [img.get("id") for img in gallery_images if img.get("id")]
-        logger.info(f"📸 Found {len(img_ids)} gallery images to analyze.")
+        img_ids = [img.get("id") for img in valid_images if img.get("id")]
+        logger.info(f"📸 Found {len(img_ids)} valid images to analyze.")
         
         logger.info(f"🔄 Refreshing Signed URLs for {len(img_ids)} images...")
         refreshed = api.refresh_photo_urls(img_ids)
@@ -104,7 +100,7 @@ def process_property_analysis(property_id: int):
         from PIL import Image
         from io import BytesIO
         
-        for img_meta in gallery_images[:15]:  # Limit 15 ภาพเพื่อประหยัด Token/เวลา
+        for img_meta in valid_images[:15]:  # Limit 15 ภาพเพื่อประหยัด Token/เวลา
             img_url = url_map.get(str(img_meta.get("id"))) or img_meta.get("url")
             try:
                 r_img = requests.get(img_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)

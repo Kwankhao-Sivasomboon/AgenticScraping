@@ -77,14 +77,14 @@ def analyze_arnon_properties():
             continue
 
         # 🕵️‍♂️ กรองเอาทุกภาพยกเว้นภาพที่เป็น "Common facilities" เพื่อให้ AI เห็นห้องต่างๆ ครบถ้วน
-        gallery_images = [img for img in images_info if img.get("tag") != "Common facilities"]
+        valid_images = [img for img in images_info if img.get("tag") != "Common facilities"]
         
-        if not gallery_images:
-            print(f"⚠️ Skip {prop_id}: ไม่มีภาพ gallery ให้วิเคราะห์")
+        if not valid_images:
+            print(f"⚠️ Skip {prop_id}: ไม่มีภาพที่วิเคราะห์ได้ (ส่วนกลางทั้งหมด หรือไม่มีภาพ)")
             continue
 
         # 🔄 Refresh URLs (Batch)
-        img_ids = [img.get("id") for img in gallery_images if img.get("id")]
+        img_ids = [img.get("id") for img in valid_images if img.get("id")]
         print(f"🔄 Refreshing Signed URLs for {len(img_ids)} images...")
         refreshed = api.refresh_photo_urls(img_ids)
         
@@ -101,7 +101,7 @@ def analyze_arnon_properties():
             
         # 📸 ดาวน์โหลดรูปทื่ Refresh แล้ว (จำกัดแค่ 15 รูปทิเด่นๆ)
         pil_images = []
-        for img_meta in gallery_images[:15]:
+        for img_meta in valid_images[:15]:
             img_url = url_map.get(str(img_meta.get("id"))) or img_meta.get("url")
             pil_img = download_image(img_url)
             if pil_img:

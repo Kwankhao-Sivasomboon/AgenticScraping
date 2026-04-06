@@ -16,9 +16,9 @@ load_dotenv()
 
 BASE_URL = os.getenv('AGENT_API_BASE_URL', 'https://dev.yourhome.co.th/api')
 
-def optimize_to_webp(image_bytes, quality=85):
+def optimize_to_avif(image_bytes, quality=85, max_size=512):
     """
-    แปลงรูปภาพเป็น Webp ด้วย quality 85
+    แปลงรูปภาพเป็น AVIF และบีบย่อขนาดไม่เกิน 512px เพื่อประหยัดพื้นที่และ bandwidth
     """
     img = Image.open(io.BytesIO(image_bytes))
     
@@ -28,8 +28,18 @@ def optimize_to_webp(image_bytes, quality=85):
     elif img.mode != "RGB":
         img = img.convert("RGB")
         
+    # ย่อขนาดรูปโดยคงอัตราส่วนเดิม (ด้านที่ยาวที่สุดจะไม่เกิน max_size)
+    img.thumbnail((max_size, max_size))
+        
     out_io = io.BytesIO()
-    img.save(out_io, format="WEBP", quality=quality)
+    
+    # พยายาม import plugin สำหรับ AVIF (ถ้ามี)
+    try:
+        import pillow_avif
+    except ImportError:
+        pass
+        
+    img.save(out_io, format="AVIF", quality=quality)
     return out_io.getvalue()
 
 def process_property(property_id, api, headers, base):
@@ -93,7 +103,7 @@ def process_property(property_id, api, headers, base):
     upload_payload_files = []
     old_image_ids = []
 
-    print(f"   📸 พบรูปภาพทั้งหมด {len(raw_images)} รูป กำลังประมวลผลเป็น WebP...")
+    print(f"   📸 พบรูปภาพทั้งหมด {len(raw_images)} รูป กำลังประมวลผลเป็น AVIF...")
 
     # 2. จัดการแปลงรูปทุกรูป (Sequential indexing: photos[0], photos[1]...)
     process_idx = 0
@@ -103,9 +113,9 @@ def process_property(property_id, api, headers, base):
         
         if not img_id or not img_url: continue
         
-        # ข้ามถ้ารูปเป็น webp อยู่แล้ว
-        if img_url.lower().split('?')[0].endswith('.webp'):
-            print(f"      ✅ รูป {img_id} เป็น WebP อยู่แล้ว ข้าม...")
+        # ข้ามถ้ารูปเป็น avif อยู่แล้ว
+        if img_url.lower().split('?')[0].endswith('.avif'):
+            print(f"      ✅ รูป {img_id} เป็น AVIF อยู่แล้ว ข้าม...")
             continue
         
         try:
@@ -115,17 +125,17 @@ def process_property(property_id, api, headers, base):
                 print(f"      ❌ โหลดไม่สำเร็จ: {img_id}")
                 continue
             
-            # แปลงเป็น WebP
-            optimized_webp = optimize_to_webp(img_res.content, quality=85)
+            # แปลงเป็น AVIF
+            optimized_avif = optimize_to_avif(img_res.content, quality=85)
             
             img_tag = img_obj.get('tag') or 'gallery'
             upload_payload_files.append({
-                'file_tuple': (f"opt_{img_id}.webp", optimized_webp, 'image/webp'),
+                'file_tuple': (f"opt_{img_id}.avif", optimized_avif, 'image/avif'),
                 'tag': img_tag
             })
             
             old_image_ids.append(img_id)
-            print(f"      🪄 แปลงรูป {img_id} สำเร็จ ({len(img_res.content)/1024:.1f}KB -> {len(optimized_webp)/1024:.1f}KB) [Tag: {img_tag}]")
+            print(f"      🪄 แปลงรูป {img_id} สำเร็จ ({len(img_res.content)/1024:.1f}KB -> {len(optimized_avif)/1024:.1f}KB) [Tag: {img_tag}]")
             process_idx += 1
             
         except Exception as e:
@@ -202,7 +212,7 @@ def process_property(property_id, api, headers, base):
 
 def main():
     # Setup Argument Parser สำหรับโหมดทดสอบ
-    parser = argparse.ArgumentParser(description='Optimize property images to WebP')
+    parser = argparse.ArgumentParser(description='Optimize property images to AVIF')
     parser.add_argument('--id', type=str, help='Specific Property ID to process (Test Mode)')
     args = parser.parse_args()
 
