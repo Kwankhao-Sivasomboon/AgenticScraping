@@ -1,6 +1,7 @@
 import os
 import sys
 import uuid
+import hashlib
 import gspread
 from google.oauth2.service_account import Credentials
 from dotenv import load_dotenv
@@ -89,6 +90,7 @@ def run_import():
 
     success_count = 0
     duplicate_count = 0
+    skipped_count = 0
     fail_count = 0
     processed_count = 0  # นับเฉพาะรายการที่ผ่าน Zone filter และประมวลผลจริง
 
@@ -103,42 +105,54 @@ def run_import():
         
         # [New] ถ้าใส่ 'all' ให้ข้ามการกรอง และใช้โซนจากในแถวนั้นๆ แทน
         if zone_input.lower() != 'all' and row_zone != zone_input:
-            # print(f"⏭️ ข้ามแถวที่ {i}: โซน '{row_zone}' ไม่ตรงกับ '{zone_input}'")
+            print(f"⏭️ ข้ามแถวที่ {i}: โซน '{row_zone}' ไม่ตรงกับตัวเลือก '{zone_input}'")
             continue
             
         # เลือกโซนที่จะบันทึก: ถ้าโหมด all ให้ใช้จาก sheet, ถ้าโหมดเจาะจงให้ใช้ตาม input
         target_zone = row_zone if zone_input.lower() == 'all' else zone_input
 
-        # หาคอลัมน์ลิงค์แบบยืดหยุ่น (เผื่อก๊อปปี้มาแล้วตั้งชื่อว่า 'ลิงค์', 'Link', หรือ 'URL')
+        # 3. จัดการ ID และเช็ค Duplicate
         link = str(row.get('ลิงค์', row.get('Link', row.get('URL', '')))).strip()
-        if not link:
-            continue
-            
-        print(f"\n======================================")
-        print(f"🔍 กำลังตรวจสอบแถวที่ {i}: {row.get('ชื่อโครงการ', 'ไม่ระบุ')} (โซน: {row_zone})")
-        
-        # 3. เช็ค Duplicate (จาก Field 'url' ใน Firestore)
-        # พยายามดึง ID จากลิงก์ (เช่น gDgDjg_CjfgygI) เพื่อความสวยงามและไล่ข้อมูลง่าย
-        extracted_id = None
-        if "istockdetail/" in link:
-            try:
-                extracted_id = link.split("istockdetail/")[1].split(".html")[0]
-            except: pass
-            
-        new_listing_id = extracted_id if extracted_id else f"ImportSheet_{uuid.uuid4().hex[:8]}"
+        p_name = str(row.get('ชื่อโครงการ', '-')).strip()
+        h_num = str(row.get('เลขที่ห้อง', '-')).strip()
+        f_num = str(row.get('ชั้น', '-')).strip()
+
         is_update = False
+        new_listing_id = None
         
-        try:
-            # ใช้ google_firestore.FieldFilter เพื่อเลี่ยง warning (Firestore >= 2.0)
+        if link and link != "-":
+            # 🔗 กรณีมีลิงก์: ใช้ ID จากลิงก์ หรือ URL ตรงๆ
+            extracted_id = None
+            if "istockdetail/" in link:
+                try: extracted_id = link.split("istockdetail/")[1].split(".html")[0]
+                except: pass
+            new_listing_id = extracted_id if extracted_id else f"ImportSheet_{uuid.uuid4().hex[:8]}"
+            
+            # เช็คซ้ำจาก URL
             existing_docs = firestore.db.collection(firestore.collection_name).where(filter=google_firestore.FieldFilter("url", "==", link)).limit(1).get()
             if len(existing_docs) > 0:
                 new_listing_id = existing_docs[0].id
                 is_update = True
-                print(f"⚠️ รายการนี้มีอยู่ใน Firestore แล้ว (URL ซ้ำ) จะทำการอัปเดตข้อมูลเพิ่มให้...")
-        except Exception as e:
-            print(f"❌ เกิดข้อผิดพลาดตอนเช็ค URL: {e}")
-            fail_count += 1
-            continue
+        else:
+            # 🚫 กรณีไม่มีลิงก์: สร้าง ID จาก (ชื่อโครงการ + เลขห้อง + ชั้น) เพื่อให้รันซ้ำแล้วไม่เบิ้ล
+            # ใช้ SHA256 เพื่อความสั้นและเป็นระเบียบ
+            unique_str = f"{p_name}_{h_num}_{f_num}"
+            if unique_str == "-_-_-" : # ถ้าข้อมูลหลักไม่มีเลยจริงๆ ค่อยสุ่ม ID
+                new_listing_id = f"ImportNoData_{uuid.uuid4().hex[:8]}"
+            else:
+                stable_hash = hashlib.sha256(unique_str.encode()).hexdigest()[:12]
+                new_listing_id = f"NoLink_{stable_hash}"
+            
+            # เช็คซ้ำจาก ID ของเอกสารโดยตรง
+            doc_check = firestore.db.collection(firestore.collection_name).document(new_listing_id).get()
+            if doc_check.exists:
+                is_update = True
+        
+        if is_update:
+            print(f"⚠️ รายการนี้มีอยู่ใน Firestore แล้ว จะทำการอัปเดตข้อมูลเพิ่มให้... (ID: {new_listing_id})")
+        else:
+            print(f"🆕 รายการใหม่: กำลังจัดเตรียมข้อมูล... (ID: {new_listing_id})")
+
 
         # สร้างข้อมูลอัปเดต (ดึงแบบไดนามิกตามคอลัมน์ที่มีใน Sheet)
         raw_data_updates = {
@@ -241,9 +255,16 @@ def run_import():
             try:
                 doc_ref = firestore.db.collection(firestore.collection_name).document(new_listing_id)
                 
-                # ดึงข้อมูลเดิมมาดูว่า Import ไปกี่ครั้งแล้ว
+                # ดึงข้อมูลเดิมมาดูว่า Import ไปกี่ครั้งแล้ว และสถานะการ Sync
                 old_snap = doc_ref.get()
                 old_data = old_snap.to_dict() if old_snap.exists else {}
+                
+                # 🛑 [NEW] ถ้าเคย Sync สำเร็จไปแล้ว (api_synced == True) ให้ข้ามรายการนี้ไปเลย
+                if old_data.get("api_synced") is True:
+                    print(f"⏭️ ข้าม {new_listing_id}: เนื่องจากมีสถานะ api_synced เป็น True แล้ว")
+                    skipped_count += 1 
+                    continue
+
                 old_count = old_data.get("import_count", 0)
                 if not isinstance(old_count, int): old_count = 0
                 new_import_count = old_count + 1
@@ -286,6 +307,7 @@ def run_import():
 
     print(f"\n🎉 สรุปผลการ Import:")
     print(f"   - นำเข้าใหม่: {success_count} รายการ")
+    print(f"   - ข้าม (เคยซิงค์แล้ว): {skipped_count} รายการ")
     print(f"   - พบข้อมูลเดิมและตั้งค่าอัปเดตแล้ว: {duplicate_count} รายการ")
     print(f"   - ล้มเหลว: {fail_count} รายการ")
 

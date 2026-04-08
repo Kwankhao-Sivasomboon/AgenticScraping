@@ -14,25 +14,38 @@ from src.services.api_service import APIService
 
 load_dotenv()
 
-# ไม่ต้องระบุ START_ID/END_ID แล้ว เพราะจะดึงจาก Firestore โดยตรง
+# English mapping for the 14 colors
+ENGLISH_COLORS = [
+    "Green", "Brown", "Red", "Dark Yellow", "Orange", "Purple", "Pink", 
+    "Light Yellow", "Yellowish Brown", "Light Brown", "White", "Gray", "Blue", "Black"
+]
 
 class PropertyAnalysis(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra='ignore')
-    architect_style: str = Field(description="Strictly ONE of: Modern, Nordic, Contemporary, Minimalist, Loft, Luxury, Other. If Condo, use Interior Style. If House, use Exterior Architect Style.")
-    room_color: List[int] = Field(description="Aggregated 14-color percentage for Walls and Doors in order: [Green, Brown, Red, Dark Yellow, Orange, Purple, Pink, Light Yellow, Yellowish Brown, Light Brown, White, Gray, Blue, Black]")
+    architect_style: str = Field(description="Strictly ONE of: Modern, Nordic, Contemporary, Minimalist, Loft, Luxury, Other.")
+    poor_condition_image_indices: List[int] = Field(default_factory=list, description="Indices of images showing old/dirty condition.")
+    raw_room_color: str = Field(description="Detailed raw colors. FORMAT exactly as: 'Walls: [color], Doors: [color], Floors: [color], Ceilings: [color]'")
+    raw_furniture_color: str = Field(description="Detailed raw colors for various furniture elements (e.g., 'Sofa: Navy Blue, Bed: Oak Wood, Table: White')")
+    # ... (the rest remains compatible)
+    room_color: List[int] = Field(description="Aggregated 14-color percentage for structural elements (Walls, Doors, Floors, Ceilings/Roofs) in order: [Green, Brown, Red, Dark Yellow, Orange, Purple, Pink, Light Yellow, Yellowish Brown, Light Brown, White, Gray, Blue, Black]")
+    element_room: List[str] = Field(description="List of 14 strings. Each string 'i' contains comma-separated English names of structural elements (e.g. wall, door, floor, ceiling, roof) in that exact color 'i'. If empty, use \"\". Max 10 items per color.")
     element_color: List[int] = Field(description="Aggregated 14-color percentage for Furniture in the same order.")
-    element_furniture: List[str] = Field(description="List of 14 strings. Each string 'i' contains comma-separated English names of furniture items in that exact color 'i'. If empty, use \"\". Max 10 items per color.")
+    element_furniture: List[str] = Field(description="List of 14 strings. Each string 'i' contains unique comma-separated furniture names in that color 'i'. If empty, use \"\". Max 10 items per color.")
 
-def download_image(url: str, retries=1):
+def download_image_as_part(url: str):
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         r = requests.get(url, headers=headers, timeout=15)
         if r.status_code == 200:
             img = Image.open(BytesIO(r.content))
-            img.thumbnail((800, 800))
-            return img
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            img.thumbnail((512, 512)) # ลดให้พอเหมาะ
+            buffer = BytesIO()
+            img.save(buffer, format="JPEG", quality=80) 
+            return types.Part.from_bytes(data=buffer.getvalue(), mime_type='image/jpeg')
         elif r.status_code == 403:
-            print(f"      [!] 403 Forbidden: รูปภาพถูกลบหรือปิดกั้นทื่ต้นทาง S3")
+            print(f"      [!] 403 Forbidden: รูปภาพถูกลบหรือปิดกั้นที่ต้นทาง")
         else:
             print(f"      [!] Download failed: Status {r.status_code}")
     except Exception as e:
@@ -40,7 +53,7 @@ def download_image(url: str, retries=1):
     return None
 
 def analyze_arnon_properties():
-    # อัปเกรดรุ่นโมเดลตามคำสั่งบอส (เพื่อความละเอียด)
+    # 🚀 กลับมาใช้ Gemini 2.5 Flash เพื่อความเสถียร (รุ่น 3 Preview ดูเหมือนจะทำให้เกิดอาการค้างในบางช่วง)
     model_name = 'gemini-2.5-flash'
     api_key = os.getenv('GEMINI_API_KEY_COLOR') or os.getenv('GEMINI_API_KEY')
     if not api_key:
@@ -59,13 +72,20 @@ def analyze_arnon_properties():
     docs = fs.db.collection("Launch_Properties").get()
     
     tasks = []
+    total_docs = 0
+    analyzed_count = 0
     for doc in docs:
+        total_docs += 1
         d = doc.to_dict()
-        # 🔥 งานที่ต้องทำคือ analyzed เป็น False หรือเป็น None (ยังไม่เคยมีผลสี)
-        if not d.get("analyzed") and not d.get("room_color"):
+        # 🔥 งานที่ต้องทำคือ analyzed เป็น False หรือเป็น None (เอาเช็ค room_color ออกเพื่อให้เจอครบ 888 ตามบอสสั่ง)
+        if not d.get("analyzed"):
              tasks.append(doc)
+        else:
+             analyzed_count += 1
     
-    print(f"📊 Found {len(tasks)} tasks to analyze.")
+    print(f"📊 Total Docs in Launch_Properties: {total_docs}")
+    print(f"✅ Already Analyzed: {analyzed_count}")
+    print(f"🎯 Tasks remaining to analyze: {len(tasks)}")
     
     for doc in tasks:
         prop_id = doc.id
@@ -77,14 +97,14 @@ def analyze_arnon_properties():
             continue
 
         # 🕵️‍♂️ กรองเอาทุกภาพยกเว้นภาพที่เป็น "Common facilities" เพื่อให้ AI เห็นห้องต่างๆ ครบถ้วน
-        valid_images = [img for img in images_info if img.get("tag") != "Common facilities"]
+        gallery_images = [img for img in images_info if img.get("tag") != "Common facilities"]
         
-        if not valid_images:
-            print(f"⚠️ Skip {prop_id}: ไม่มีภาพที่วิเคราะห์ได้ (ส่วนกลางทั้งหมด หรือไม่มีภาพ)")
+        if not gallery_images:
+            print(f"⚠️ Skip {prop_id}: ไม่มีภาพ gallery ให้วิเคราะห์")
             continue
 
         # 🔄 Refresh URLs (Batch)
-        img_ids = [img.get("id") for img in valid_images if img.get("id")]
+        img_ids = [img.get("id") for img in gallery_images if img.get("id")]
         print(f"🔄 Refreshing Signed URLs for {len(img_ids)} images...")
         refreshed = api.refresh_photo_urls(img_ids)
         
@@ -99,19 +119,19 @@ def analyze_arnon_properties():
             for item in items:
                 url_map[str(item.get("id"))] = item.get("url")
             
-        # 📸 ดาวน์โหลดรูปทื่ Refresh แล้ว (จำกัดแค่ 15 รูปทิเด่นๆ)
-        pil_images = []
-        for img_meta in valid_images[:15]:
+        # 📸 ดาวน์โหลดรูปและบีบอัดเป็นคำขอ JPEG ขนาดเล็ก
+        image_parts = []
+        original_image_ids = []
+        for img_meta in gallery_images[:15]:
             img_url = url_map.get(str(img_meta.get("id"))) or img_meta.get("url")
-            pil_img = download_image(img_url)
-            if pil_img:
-                pil_images.append(pil_img)
+            part = download_image_as_part(img_url)
+            if part:
+                image_parts.append(part)
+                original_image_ids.append(str(img_meta.get("id")))
         
-        if not pil_images:
+        if not image_parts:
             print(f"❌ Property {prop_id}: ไม่สามารถโหลดรูปภาพได้เลย")
             continue
-
-        print(f"🎬 Analyzing Property {prop_id} with {len(pil_images)} images...")
 
         # ดึง Property Type จาก Agent API สดๆ
         headers = api._get_auth_headers()
@@ -136,18 +156,25 @@ def analyze_arnon_properties():
             style_instruction = f"This is a {prop_type_name or 'HOUSE/BUILDING'}. Identify the ARCHITECTURAL exterior style based on the building shape and structure."
 
         prompt = (
-            "Analyze these images of a SINGLE property to summarize its characteristics. "
+            "Analyze these images of a SINGLE property to summarize its characteristics. The images are provided in a sequential list (Order: 0, 1, 2, ...).\n"
             "IMPORTANT: Images show the same rooms and furniture from DIFFERENT angles. DO NOT double-count items. "
             "1. Mental Mapping: Build a mental spatial map of the property. Identify unique furniture items (e.g., if you see the same blue bed in 3 photos, it counts as ONE blue bed).\n"
+            "   - 'poor_condition_image_indices': Identify and list integer indices (0-based) of images showing an old, unrenovated, poorly maintained, cluttered, or dirty room condition. If none, return [].\n"
             f"2. {style_instruction} You MUST choose EXACTLY ONE from this list: Modern, Nordic, Contemporary, Minimalist, Loft, Luxury, Other.\n"
-            "3. 'room_color': Aggregate percentage (0-100) for Walls and Doors surfaces based on the estimated total surface area of the entire property.\n"
-            "4. 'element_color': Aggregate percentage (0-100) for Furniture surface area. Deduplicate objects across images to prevent color inflation.\n"
-            "5. Color order (14 colors): [0:Green, 1:Brown, 2:Red, 3:Dark Yellow, 4:Orange, 5:Purple, 6:Pink, 7:Light Yellow, 8:Yellowish Brown, 9:Light Brown, 10:White, 11:Gray, 12:Blue, 13:Black].\n"
-            "6. Both color arrays must be exactly 14 integers summing to exactly 100.\n"
-            "7. 'element_furniture': Array of exactly 14 STRINGS. Each string 'i' contains unique comma-separated furniture names in that color 'i'.\n"
-            "8. STRICTLY EXCLUDE all electrical appliances (AC, washing machines, refrigerators, TVs, microwaves, etc.).\n"
-            "9. COHERENCE RULE (CRITICAL): If 'element_furniture[i]' is NOT empty, 'element_color[i]' MUST be > 0. If 'element_color[i]' is 0, 'element_furniture[i]' MUST be \"\".\n"
-            "10. NO REPETITION & LIMIT: List at most 10 unique items per color string. DO NOT repeat the same word. Use plural (e.g., 'chairs') instead of repeating same text."
+            "3. 'raw_room_color': Provide detailed raw colors. Format exactly as: 'Walls: [color], Doors: [color], Floors: [color], Ceilings: [color]'.\n"
+            "4. 'raw_furniture_color': Provide the true/raw colors of the furniture in a single string (e.g. 'Sofa: Emerald Green, Bed: Walnut').\n"
+            "5. 'room_color': Aggregate percentage (0-100) for ALL structural elements (Walls, Doors, Floors, Ceilings, and Roofs).\n"
+            "6. 'element_room': Array of 14 strings listing elements in each color index.\n"
+            "7. 'element_color': Aggregate percentage (0-100) for Furniture.\n"
+            "8. 'element_furniture': Array of 14 strings listing unique furniture items in each color index.\n"
+            "9. Color order (14 colors): [0:Green, 1:Brown, 2:Red, 3:Dark Yellow, 4:Orange, 5:Purple, 6:Pink, 7:Light Yellow, 8:Yellowish Brown, 9:Light Brown, 10:White, 11:Gray, 12:Blue, 13:Black].\n"
+            "10. Both color arrays must be exactly 14 integers summing to exactly 100.\n"
+            "11. STRICTLY EXCLUDE all electrical appliances (AC, washing machines, refrigerators, TVs, microwaves, etc.).\n"
+            "12. COHERENCE RULE (CRITICAL): If 'element_furniture[i]' is NOT empty, 'element_color[i]' MUST be > 0. If 'element_color[i]' is 0, 'element_furniture[i]' MUST be \"\".\n"
+            "13. NO REPETITION & LIMIT: List at most 10 unique items per color string. DO NOT repeat the same word. Use plural (e.g., 'chairs') instead of repeating same text.\n"
+            "14. LIGHTING COMPENSATION (CRITICAL): Photos often have warm yellow/orange lighting that can make White or Gray walls look Pink, Orange, or Purple. "
+            "You MUST identify the ACTUAL material/paint color as a human would see it in neutral daylight. "
+            "Favor neutral colors like Gray (11), White (10), or Light Brown (9) for typical modern interiors unless a vibrant color like Pink (6) is an explicit, intentional decorative choice."
         )
         
         # --- Gemini Analysis with Retry Logic ---
@@ -155,8 +182,12 @@ def analyze_arnon_properties():
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                # ส่งรูปยกชุดให้ AI
-                contents = [prompt] + pil_images
+                # 🕒 Pacing เล็กน้อยก่อนส่ง AI
+                time.sleep(3)
+                print(f"🎬 Analyzing Property {prop_id} with {len(image_parts)} images...")
+
+                # ส่งรูป (ที่บีบอัดแล้ว) ยกชุดให้ AI 
+                contents = [prompt] + image_parts
                 response = client.models.generate_content(
                     model=model_name,
                     contents=contents,
@@ -171,17 +202,45 @@ def analyze_arnon_properties():
                 from datetime import datetime, timedelta
                 now_iso = (datetime.utcnow() + timedelta(hours=7)).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
                 
+                # คำนวณ house_color (อันดับ 1) และ house_color2 (อันดับ 2) จาก room_color + element_color
+                combined_colors = []
+                for i in range(14):
+                    r_val = res.room_color[i] if i < len(res.room_color) else 0
+                    e_val = res.element_color[i] if i < len(res.element_color) else 0
+                    combined_colors.append(r_val + e_val)
+                    
+                sorted_idx = sorted(range(len(combined_colors)), key=lambda k: combined_colors[k], reverse=True)
+                house_color = ENGLISH_COLORS[sorted_idx[0]] if sum(combined_colors) > 0 else "Not Specified"
+                house_color2 = ENGLISH_COLORS[sorted_idx[1]] if sum(combined_colors) > 0 and combined_colors[sorted_idx[1]] > 0 else ""
+
+                # แมป Index ภาพที่เก่า/สกปรก กลับไปเป็น Image ID
+                poor_image_ids = []
+                for idx in res.poor_condition_image_indices:
+                    if 0 <= idx < len(original_image_ids):
+                        poor_image_ids.append(original_image_ids[idx])
+
                 # บันทึกผลลัพธ์ที่ระดับ Property
-                fs.db.collection("Launch_Properties").document(prop_id).update({
+                update_payload = {
+                    "raw_room_color": res.raw_room_color,
+                    "raw_furniture_color": res.raw_furniture_color,
                     "architect_style": res.architect_style,
                     "room_color": res.room_color,
+                    "element_room": res.element_room,
+                    "house_color": house_color,
+                    "house_color2": house_color2,
                     "element_color": res.element_color,
                     "element_furniture": res.element_furniture,
                     "analyzed": True,
-                    "analyzed_at": now_iso, # 🕒 บันทึกเวลาไทยลง Firestore
+                    "analyzed_at": now_iso,
                     "uploaded": False,
-                    "images_analyzed": len(pil_images)
-                })
+                    "images_analyzed": len(image_parts)
+                }
+
+                # ⚠️ เฉพาะถ้าเจอภาพรก/สกปรก ถึงจะอัปเดตฟิลด์นี้ (ตามที่บอสถาม)
+                if poor_image_ids:
+                    update_payload["poor_condition_image_ids"] = poor_image_ids
+
+                fs.db.collection("Launch_Properties").document(prop_id).update(update_payload)
                 print(f"✅ Property {prop_id} Sync Success!")
                 success = True
                 time.sleep(2)

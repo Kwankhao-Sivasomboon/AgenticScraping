@@ -18,10 +18,13 @@ class PropertyImagesAnalysis(BaseModel):
         extra='ignore' # ถ้า AI ตอบเกินมาให้ข้ามไป ไม่ต้อง Error
     )
     average_color_hex: str = Field(description="HEX code of the overall dominant room color, e.g. #FFFFFF (Left for backward compatibility, you can put any hex here)")
+    raw_room_color: str = Field(description="The actual raw name or hex of the dominant room color (e.g. '#EAEAEA', 'Cream') before mapping.")
+    raw_furniture_color: str = Field(description="The actual raw name or hex of the dominant furniture color before mapping.")
     color: str = Field(description="The single overall dominant color of the property with the highest percentage. Must be one of the predefined list colors in Thai.")
     room_color: List[int] = Field(description="List of 14 integers summing to 100, representing color percentages in order: [Green, Brown, Red, Dark Yellow, Orange, Purple, Pink, Light Yellow, Yellowish Brown, Light Brown, White, Gray, Blue, Black]")
     element_color: List[int] = Field(description="List of 14 integers summing to 100, representing element color percentages in the same 14-color order.")
     element_furniture: List[List[str]] = Field(description="List of 14 lists of strings. Each sublist contains the names of furniture/appliances in that exact color in the same 14-color order. If a color has 0%, its sublist should be empty [].")
+    poor_condition_image_indices: List[int] = Field(default_factory=list, description="List of integer indices (0-based) of images showing old, unrenovated, poorly maintained, cluttered or dirty conditions.")
     interior_style: str = Field(description="Interior style: one of Modern, Nordic, Contemporary, Minimalist, Loft, Luxury, Other")
     property_type: str = Field(description="Property type: one of 'condo', 'house', 'unknown' based on structural cues")
     valid_image_indices: List[int] = Field(description="List of integer indices (0-based) of images that show MAIN property features: INTERIOR rooms (bedroom, living room, kitchen, bathroom) or EXTERIOR of the actual house. Exclude: maps, floor plans, people, animals, blurry images.")
@@ -48,7 +51,7 @@ def download_image(url: str, retries=2) -> Optional[Image.Image]:
                 img = Image.open(BytesIO(r.content))
                 if img.mode != "RGB":
                     img = img.convert("RGB")
-                img.thumbnail((800, 800))
+                img.thumbnail((640, 640))
                 return img
         except Exception as e:
             if attempt == retries - 1:
@@ -92,9 +95,9 @@ def analyze_room_images(image_urls: List[str]) -> Optional[PropertyImagesAnalysi
     # ดาวน์โหลดรูปภาพเก็บเป็น List ของ ข้อมูล
     downloaded_data = []
     for i, u in enumerate(image_urls):
-        # สุ่ม sleep สั้นๆ ระหว่างรูปเพื่อกันโดนบล็อก (เพิ่ม delay ขึ้นอีกเพื่อความปลอดภัยยิ่งขึ้น)
+        # สุ่ม sleep สั้นๆ ระหว่างรูปเพื่อกันโดนบล็อก
         import random
-        time.sleep(random.uniform(1.5, 3.5))
+        time.sleep(random.uniform(1.0, 2.5))
         img = download_image(u)
         if img: 
             downloaded_data.append({"img": img, "url": u, "original_index": i})
@@ -113,38 +116,35 @@ def analyze_room_images(image_urls: List[str]) -> Optional[PropertyImagesAnalysi
     original_indices = [item['original_index'] for item in unique_data]
 
     prompt = (
-        "Analyze these property images. "
+        "Analyze these property images. The images are provided in order (0, 1, 2, ...).\n"
         "IMPORTANT INSTRUCTIONS:\n"
-        "1. Identify valid images and categorize them into two lists:\n"
+        "1. Identify valid images and categorize them into lists:\n"
         "   - 'valid_image_indices': ONLY include images that show MAIN property features: INTERIOR rooms (bedroom, living room, kitchen, bathroom) or EXTERIOR of the actual house/building.\n"
-        "   - 'secondary_image_indices': Include images that are VALID but NOT main features: Facilities, Swimming Pool, Gym, Fitness center, Lobby, Corridor, or nice building surroundings. Still exclude junk.\n"
-        "   - IGNORE and skip any images that show ONLY: maps, floor plans, blueprints, purely text-based ads/Line ID cards, people/animals, or completely blurry/irrelevant images.\n"
-        "2. List the indices (0-based) based on the criteria above.\n"
-        "3. Analyze colors of Wall, Door, and Furniture from the MAIN images and provide overall dominant 'color' in Thai.\n"
-        "4. YOU MUST evaluate exactly 14 colors in this STRICT order for 'room_color' and 'element_color':\n"
+        "   - 'secondary_image_indices': Include images that are VALID but NOT main features: Facilities, Swimming Pool, Gym, Lobby, Corridor.\n"
+        "   - 'poor_condition_image_indices': Identify and list integer indices (0-based) of images showing an old, unrenovated, poorly maintained, cluttered, or dirty room condition.\n"
+        "2. 'raw_room_color': Provide the true/raw dominant color name or hex of the room walls/floors before mapping.\n"
+        "3. 'raw_furniture_color': Provide the true/raw dominant color name or hex of the furniture before mapping.\n"
+        "4. Analyze colors of Wall, Door, and Furniture from the MAIN images and provide overall dominant 'color' in Thai.\n"
+        "5. YOU MUST evaluate exactly 14 colors in this STRICT order for 'room_color' and 'element_color':\n"
         "   1. Green, 2. Brown, 3. Red, 4. Dark Yellow, 5. Orange, 6. Purple, 7. Pink, 8. Light Yellow, 9. Yellowish Brown, 10. Light Brown, 11. White, 12. Gray, 13. Blue, 14. Black\n"
-        "5. Provide 'room_color' and 'element_color' as JSON arrays of 14 integers summing exactly to 100.\n"
-        "6. For 'element_furniture': YOU MUST list ALL furniture and objects you can see in ALL the images. "
-        "   For each item, place it under the color index that BEST matches its dominant color. "
-        "   Be GENEROUS and inclusive — if you see a bed, sofa, wardrobe, table, chair, mirror, lamp, curtain, or any other object, list it. "
-        "   Do NOT leave sub-arrays empty if there are any items of that color in the room. "
-        "   Example: White bed → index 10 (White), Dark brown cabinet → index 9 (Light Brown) or 1 (Brown). "
-        "   The result must be an array of exactly 14 sub-arrays. Each sub-array contains English names of items.\n"
-        "7. Categorize the Interior Design Style: Modern, Nordic, Contemporary, Minimalist, Loft, Luxury, Other.\n"
-        "8. Categorize the property_type: 'condo', 'house', or 'unknown'."
+        "6. Provide 'room_color' and 'element_color' as JSON arrays of 14 integers summing exactly to 100.\n"
+        "7. For 'element_furniture': YOU MUST list ALL furniture and objects you can see in ALL the images grouped by color index. "
+        "8. Categorize the Interior Design Style: Modern, Nordic, Contemporary, Minimalist, Loft, Luxury, Other.\n"
+        "9. Categorize the property_type: 'condo', 'house', or 'unknown'.\n"
+        "10. LIGHTING COMPENSATION (CRITICAL): Photos often have warm yellow/orange lighting. Identify the ACTUAL material/paint color as a human would see it in neutral daylight. "
+        "Favor neutral colors like Gray (12), White (11), or Light Brown (10) unless a vibrant color like Pink (7) is an explicit decorative choice."
     )
 
-    contents = [prompt]
-    for orig_idx, img in zip(original_indices, pil_images):
-        contents.append(f"Image Index: {orig_idx}")
-        contents.append(img)
+    contents = [prompt] + pil_images
         
-    print(f"  [AI] Sending {len(pil_images)} images to Gemini for analysis (Color, Style, Filtering)...")
+    print(f"  [AI] Sending {len(pil_images)} images to Gemini for analysis (Gemini 3 Flash Preview)...")
     
     for attempt in range(3):
         try:
+            # 🕒 Pacing
+            time.sleep(2)
             response = client.models.generate_content(
-                model='gemini-2.5-flash', # โมเดลเดิม
+                model='gemini-3-flash-preview',
                 contents=contents,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
@@ -155,15 +155,14 @@ def analyze_room_images(image_urls: List[str]) -> Optional[PropertyImagesAnalysi
             analysis_data = response.text
             try:
                 result = PropertyImagesAnalysis.model_validate_json(analysis_data)
-                print(f"  [AI] Result Validated! Style: {result.interior_style}, Color: {result.color}, Images: {len(result.valid_image_indices)}")
+                print(f"  [AI] Result Validated! Style: {result.interior_style}, Color: {result.color}")
                 return result
             except Exception as ve:
                 print(f"  [AI] JSON Validation Error: {ve}")
-                print(f"  [AI] Raw Output: {analysis_data}")
                 return None
         except Exception as e:
-            if "503" in str(e) and attempt < 2:
-                time.sleep((attempt + 1) * 3)
+            if ("503" in str(e) or "429" in str(e)) and attempt < 2:
+                time.sleep((attempt + 1) * 5)
                 continue
             print(f"  [AI] API Connection Error: {e}")
             return None

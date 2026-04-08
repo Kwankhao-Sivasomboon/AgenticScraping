@@ -48,7 +48,20 @@ def upload_arnon_analysis():
         max_idx = furniture_colors.index(max(furniture_colors)) if any(furniture_colors) else 10
         dominant_color_thai = THAI_COLORS[max_idx]
 
-        # 3. Construct Payload based on Staff API spec
+        # 3. Handle structural elements (walls, floors, etc.)
+        raw_room = data.get("element_room", [])
+        formatted_room = []
+        for s in raw_room:
+            if isinstance(s, str) and s.strip():
+                items = [item.strip() for item in s.split(",") if item.strip()]
+                formatted_room.append(items)
+            else:
+                formatted_room.append([])
+                
+        house_color = data.get("house_color", "ไม่ระบุ")
+        house_color2 = data.get("house_color2", "")
+
+        # 4. Construct Payload based on Staff API spec
         from datetime import datetime, timedelta
         # 🕒 ปรับให้เป็นเวลาไทย (UTC+7) เพื่อให้ Staff API แสดงผล "Just Now"
         now_thailand = datetime.utcnow() + timedelta(hours=7)
@@ -62,6 +75,9 @@ def upload_arnon_analysis():
             "room_color": data.get("room_color"),
             "furniture_color": furniture_colors,
             "furniture_elements": formatted_furniture,
+            "house_color": house_color,
+            "house_color2": house_color2,
+            "room_elements": formatted_room,
             "interior_style": data.get("architect_style", "Other"),
             "property_type": "house"
         }

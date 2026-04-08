@@ -12,3 +12,5 @@ pillow-avif-plugin==1.5.5
 # Utilities
 python-dotenv==1.0.1
 requests==2.31.0
+beautifulsoup4==4.12.3
+googlesearch-python==1.2.3

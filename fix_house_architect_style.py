@@ -89,11 +89,11 @@ def analyze_exterior_style(image_urls: list[str]) -> str | None:
 
     contents = [prompt] + pil_images
 
-    print(f"   AI: Analyzing architect_style using gemini-2.5-flash-lite...")
+    print(f"   AI: Analyzing architect_style using gemini-3-flash-preview...")
     for attempt in range(3):
         try:
             response = client.models.generate_content(
-                model="gemini-2.5-flash-lite",
+                model="gemini-3-flash-preview",
                 contents=contents,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
