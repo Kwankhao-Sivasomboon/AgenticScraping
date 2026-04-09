@@ -14,3 +14,8 @@ python-dotenv==1.0.1
 requests==2.31.0
 beautifulsoup4==4.12.3
 googlesearch-python==1.2.3
+
+# Database & Auth
+google-cloud-firestore
+firebase-admin
+google-auth

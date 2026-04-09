@@ -1,230 +1,360 @@
 import os
+import re
 import time
 import json
 import logging
+import requests
+from io import BytesIO
+from datetime import datetime, timedelta
+from PIL import Image
 from fastapi import FastAPI, BackgroundTasks, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, ConfigDict
+from typing import List
 from dotenv import load_dotenv
 
-from src.services.api_service import APIService
-
-# Gemini Imports
 from google import genai
 from google.genai import types
-from pydantic import Field, ConfigDict
-from typing import List
 
-# Setup Logging
+from src.services.api_service import APIService
+from src.services.firestore_service import FirestoreService
+
+# Setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Load Environment Variabless
 load_dotenv()
 
-app = FastAPI(title="Property Color Analysis API", description="AI Image Analysis for Agent Uploads", version="1.0")
+app = FastAPI(title="Property Color Analysis API", version="2.0")
 
-# ----------------- Schema -----------------
+# ==========================================================
+# ⚙️ Config
+# ==========================================================
+FIRESTORE_COLLECTION = "Launch_Properties"
+
+ENGLISH_COLORS = [
+    "Green", "Brown", "Red", "Dark Yellow", "Orange", "Purple", "Pink",
+    "Light Yellow", "Yellowish Brown", "Light Brown", "White", "Gray", "Blue", "Black"
+]
+
+# ==========================================================
+# Schema  (ตรงกับ arnon_step2_analyze_colors.py)
+# ==========================================================
 class AnalyzeRequest(BaseModel):
     property_id: int
 
 class PropertyAnalysisResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra='ignore')
-    architect_style: str = Field(description="Exterior/Interior architectural style: Modern, Nordic, Contemporary, Minimalist, Loft, Luxury, Other")
-    poor_condition_image_indices: List[int] = Field(default_factory=list, description="List of integer indices (0-based) of images showing poor room condition.")
-    raw_room_color: str = Field(description="The actual raw dominant color name of the room before mapping.")
-    raw_furniture_color: str = Field(description="The actual raw dominant color name of the furniture before mapping.")
-    room_color: List[int] = Field(description="Aggregated 14-color percentage for Walls and Doors in order.")
-    element_color: List[int] = Field(description="Aggregated 14-color percentage for Furniture in the same 14-color order.")
-    element_furniture: List[str] = Field(description="List of 14 strings containing comma-separated English names of furniture items in that color.")
+    architect_style: str = Field(description="Strictly ONE of: Modern, Nordic, Contemporary, Minimalist, Loft, Luxury, Other.")
+    poor_condition_image_indices: List[int] = Field(default_factory=list, description="Indices of images showing old/dirty condition.")
+    raw_room_color: str = Field(description="Detailed raw colors. FORMAT exactly as: 'Walls: [color], Doors: [color], Floors: [color], Ceilings: [color]'")
+    raw_furniture_color: str = Field(description="Detailed raw colors for various furniture elements (e.g. 'Sofa: Navy Blue, Bed: Oak Wood')")
+    room_color: List[int] = Field(description="Aggregated 14-color percentage for structural elements (Walls, Doors, Floors, Ceilings) in order: [Green, Brown, Red, Dark Yellow, Orange, Purple, Pink, Light Yellow, Yellowish Brown, Light Brown, White, Gray, Blue, Black]")
+    element_room: List[str] = Field(description="List of 14 strings. Each string 'i' contains comma-separated English names of structural elements (wall, door, floor, ceiling) in that color 'i'. If empty, use ''. Max 10 items per color.")
+    element_color: List[int] = Field(description="Aggregated 14-color percentage for Furniture in the same order.")
+    element_furniture: List[str] = Field(description="List of 14 strings. Each string 'i' contains unique comma-separated furniture names in that color 'i'. If empty, use ''. Max 10 items per color.")
 
-THAI_COLORS = [
-    "เขียว", "น้ำตาล", "แดง", "เหลืองเข้ม", "ส้ม", "ม่วง", "ชมพู", 
-    "เหลืองอ่อน", "น้ำตาลอมเหลือง", "น้ำตาลอ่อน", "ขาว", "เทา", "น้ำเงิน", "ดำ"
-]
+# ==========================================================
+# Helpers
+# ==========================================================
+def download_image_as_part(url: str):
+    """Download and compress image as Gemini Part (ตรงกับ arnon_step2)"""
+    try:
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        if r.status_code == 200:
+            img = Image.open(BytesIO(r.content))
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            img.thumbnail((512, 512))
+            buffer = BytesIO()
+            img.save(buffer, format="JPEG", quality=80)
+            return types.Part.from_bytes(data=buffer.getvalue(), mime_type='image/jpeg')
+        else:
+            logger.warning(f"[!] Download failed: Status {r.status_code} for {url}")
+    except Exception as e:
+        logger.warning(f"[!] Download error: {e}")
+    return None
 
-# ----------------- Background Worker -----------------
+
+def try_update_agent_api(property_id: int, payload: dict) -> bool:
+    """
+    พยายามอัปเดต Agent API ด้วย Primary credential ก่อน →
+    ถ้าล้มเหลว ให้ fallback ไปใช้ AGENT_ARNON credentials
+    """
+    # Primary account (AGENT_API_EMAIL / AGENT_API_PASSWORD)
+    api_primary = APIService(
+        email=os.getenv('AGENT_API_EMAIL'),
+        password=os.getenv('AGENT_API_PASSWORD')
+    )
+    if api_primary.authenticate():
+        if api_primary.update_property(str(property_id), payload):
+            logger.info(f"✅ Agent API updated with primary account for {property_id}")
+            return True
+        logger.warning(f"⚠️ Primary account failed to update property {property_id}, trying Arnon account...")
+
+    # Fallback account (AGENT_ARNON_EMAIL / AGENT_ARNON_PASSWORD)
+    arnon_email = os.getenv('AGENT_ARNON_EMAIL')
+    arnon_password = os.getenv('AGENT_ARNON_PASSWORD')
+    if arnon_email and arnon_password:
+        api_arnon = APIService(email=arnon_email, password=arnon_password)
+        if api_arnon.authenticate():
+            if api_arnon.update_property(str(property_id), payload):
+                logger.info(f"✅ Agent API updated with Arnon account for {property_id}")
+                return True
+
+    logger.error(f"❌ Agent API update failed for {property_id} (both accounts tried)")
+    return False
+
+
+def parse_specs_from_property(prop_data: dict) -> dict:
+    """
+    ดึง floors, bedrooms, bathrooms จาก property data ที่ได้จาก Agent API
+    (เป็น dict ที่ได้จาก /api/agent/properties/{id})
+    """
+    specs = prop_data.get("specifications", {}) or {}
+    return {
+        "floors": str(specs.get("floors", "") or ""),
+        "bedrooms": str(specs.get("bedrooms", "") or prop_data.get("bedrooms", "") or ""),
+        "bathrooms": str(specs.get("bathrooms", "") or prop_data.get("bathrooms", "") or ""),
+    }
+
+# ==========================================================
+# Background Worker
+# ==========================================================
 def process_property_analysis(property_id: int):
     logger.info(f"🚀 [Task Started] Processing Property ID: {property_id}")
-    
-    # 1. Initialize Services
+
+    # 1. Initialize
     api_key = os.getenv('CLOUD_API_COLOR') or os.getenv('GEMINI_API_KEY_COLOR') or os.getenv('GEMINI_API_KEY')
     if not api_key:
         logger.error("❌ Gemini API Key not configured.")
         return
 
     client = genai.Client(api_key=api_key)
-    api = APIService() # 🚀 ปล่อยให้ APIService เลือก Email/Password จาก .env เองตามลำดับความสำคัญ
+    api = APIService()
     api.authenticate()
+    fs = FirestoreService()
 
-    # 2. Get Property Status / Details
-    status = api.get_property_status(property_id)
-    logger.info(f"   Status for {property_id}: {status}")
-
-    # 3. Retrieve and Refresh Photo URLs
+    # 2. Fetch Property Detail from Agent API
     try:
         base = api.base_url.rstrip('/')
-        if '/api' in base:
-            url_prop = f"{base}/agent/properties/{property_id}/status"
-        else:
-            url_prop = f"{base}/api/agent/properties/{property_id}/status"
-            
+        url_prop = f"{base}/api/agent/properties/{property_id}/status"
         headers_prop = api._get_auth_headers()
-        import requests
-        
-        logger.info(f"   🌐 Fetching Detail from: {url_prop}")
+
+        logger.info(f"   🌐 Fetching Detail: {url_prop}")
         r_prop = requests.get(url_prop, headers=headers_prop, timeout=15)
         res_json = r_prop.json()
-        
-        prop_data = res_json.get('data', res_json) 
-        images_info = prop_data.get('images', [])
-        
-        gallery_images = [img for img in images_info if img.get("tag") != "Common facilities"]
-        
-        if not gallery_images:
-            logger.warning(f"⚠️ No 'gallery' images found for Property {property_id}.")
-            return
-            
-        img_ids = [img.get("id") for img in gallery_images if img.get("id")]
-        logger.info(f"📸 Found {len(img_ids)} gallery images to analyze.")
-        
-        logger.info(f"🔄 Refreshing Signed URLs for {len(img_ids)} images...")
-        refreshed = api.refresh_photo_urls(img_ids)
-        
-        # จัดการ URL ใหม่
-        url_map = {}
-        if refreshed and isinstance(refreshed, dict):
-            if "refreshed_images" in refreshed:
-                items = refreshed.get("refreshed_images", [])
-            else:
-                items = refreshed.get("data", {}).get("refreshed_images", [])     
-            for item in items:
-                url_map[str(item.get("id"))] = item.get("url")
+        prop_data = res_json.get('data', res_json)
 
-        # โหลดภาพ
-        pil_images = []
-        original_image_ids = []
-        from PIL import Image
-        from io import BytesIO
-        
-        for img_meta in gallery_images[:15]:
-            img_url = url_map.get(str(img_meta.get("id"))) or img_meta.get("url")
-            try:
-                r_img = requests.get(img_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-                if r_img.status_code == 200:
-                    img = Image.open(BytesIO(r_img.content))
-                    img.thumbnail((640, 640))
-                    pil_images.append(img)
-                    original_image_ids.append(str(img_meta.get("id")))
-            except Exception as e:
-                pass
-                
-        if not pil_images:
-             logger.error(f"❌ Could not download images for Property {property_id}")
-             return
+        # Check property type (condo vs house)
+        prop_type_name = str(prop_data.get("property_type", {}).get("name", "")).strip()
+        is_condo = "condo" in prop_type_name.lower() or "apartment" in prop_type_name.lower()
+
+        # Get existing specs (floors, bedrooms, bathrooms)
+        existing_specs = parse_specs_from_property(prop_data)
+
+        images_info = prop_data.get('images', [])
+        gallery_images = [img for img in images_info if img.get("tag") != "Common facilities"]
+
+        if not gallery_images:
+            logger.warning(f"⚠️ No gallery images for Property {property_id}.")
+            return
+
+        img_ids = [img.get("id") for img in gallery_images if img.get("id")]
+        logger.info(f"📸 Found {len(img_ids)} gallery images")
 
     except Exception as e:
-        logger.error(f"❌ Failed to fetch property data for {property_id}: {e}")
+        logger.error(f"❌ Failed to fetch property data: {e}")
         return
 
-    # 4. Analyze with Gemini 
-    logger.info(f"🎬 Analyzing Property {property_id} with {len(pil_images)} images via Gemini 3 Flash Preview...")
+    # 3. Refresh photo URLs
+    try:
+        url_map = {}
+        refreshed = api.refresh_photo_urls(img_ids)
+        if refreshed and isinstance(refreshed, dict):
+            items = refreshed.get("refreshed_images") or refreshed.get("data", {}).get("refreshed_images", [])
+            for item in items:
+                url_map[str(item.get("id"))] = item.get("url")
+    except Exception as e:
+        logger.warning(f"⚠️ URL refresh failed: {e}")
+
+    # 4. Download & compress images (ตรงกับ arnon_step2)
+    image_parts = []
+    original_image_ids = []
+    for img_meta in gallery_images[:15]:
+        img_url = url_map.get(str(img_meta.get("id"))) or img_meta.get("url")
+        part = download_image_as_part(img_url)
+        if part:
+            image_parts.append(part)
+            original_image_ids.append(str(img_meta.get("id")))
+
+    if not image_parts:
+        logger.error(f"❌ Could not download any images for Property {property_id}")
+        return
+
+    # 5. Build prompt (ตรงกับ arnon_step2)
+    if is_condo:
+        style_instruction = "This is a CONDO/APARTMENT. Identify the INTERIOR DECORATION style based on the room arrangement and furniture."
+    else:
+        style_instruction = f"This is a {prop_type_name or 'HOUSE/BUILDING'}. Identify the ARCHITECTURAL exterior style based on the building shape and structure."
+
     prompt = (
         "Analyze these images of a SINGLE property to summarize its characteristics. The images are provided in a sequential list (Order: 0, 1, 2, ...).\n"
-        "IMPORTANT: Images show the same rooms and furniture from DIFFERENT angles. DO NOT double-count items. \n"
+        "IMPORTANT: Images show the same rooms and furniture from DIFFERENT angles. DO NOT double-count items. "
         "1. Mental Mapping: Build a mental spatial map of the property. Identify unique furniture items (e.g., if you see the same blue bed in 3 photos, it counts as ONE blue bed).\n"
-        "   - 'poor_condition_image_indices': Identify and list integer indices (0-based) of images showing an old, unrenovated, poorly maintained, cluttered, or dirty room condition. If none, return [].\n"
-        "2. Identify the AGGREGATED Architectural or Interior Style: Modern, Nordic, Contemporary, Minimalist, Loft, Luxury, Other.\n"
-        "3. 'raw_room_color': Provide the true/raw dominant color name or hex of the room walls/floors before mapping.\n"
-        "4. 'raw_furniture_color': Provide the true/raw dominant color name or hex of the furniture before mapping.\n"
-        "5. 'room_color': Aggregate percentage (0-100) for ALL structural elements (Walls, Doors, Floors, Ceilings, and Roofs) based on the estimated total surface area.\n"
-        "6. 'element_color': Aggregate percentage (0-100) for Furniture surface area. Deduplicate objects across images to prevent color inflation.\n"
-        "7. Exact 14 Color order: [Green, Brown, Red, Dark Yellow, Orange, Purple, Pink, Light Yellow, Yellowish Brown, Light Brown, White, Gray, Blue, Black].\n"
-        "8. Both color arrays must be exactly 14 integers summing to exactly 100.\n"
-        "9. 'element_furniture': Array of exactly 14 STRINGS. comma-separated unique furniture names in that color.\n"
-        "10. LIGHTING COMPENSATION (CRITICAL): Favor neutral colors like Gray (11), White (10), or Light Brown (9) unless a vibrant color like Pink (6) is an explicit decorative choice."
+        "   - 'poor_condition_image_indices': Identify images showing SEVERE structural damage, highly unsanitary/dirty conditions, or extreme hoarding/clutter. DO NOT flag normal empty rooms, slightly older properties, or average lived-in spaces. BE EXTREMELY CONSERVATIVE. If in doubt, return [].\n"
+        f"2. {style_instruction} You MUST choose EXACTLY ONE from this list: Modern, Nordic, Contemporary, Minimalist, Loft, Luxury, Other.\n"
+        "3. 'raw_room_color': Provide detailed raw colors. Format exactly as: 'Walls: [color], Doors: [color], Floors: [color], Ceilings: [color]'.\n"
+        "4. 'raw_furniture_color': Provide the true/raw colors of the furniture in a single string (e.g. 'Sofa: Emerald Green, Bed: Walnut').\n"
+        "5. 'room_color': Aggregate percentage (0-100) for ALL structural elements (Walls, Doors, Floors, Ceilings).\n"
+        "6. 'element_room': Array of 14 strings. Each string 'i' contains ONLY elements from this strict list ['wall', 'door', 'floor', 'ceiling'] that appear in color index 'i'. DO NOT include any other words.\n"
+        "7. 'element_color': Aggregate percentage (0-100) for Furniture.\n"
+        "8. 'element_furniture': Array of 14 strings listing unique furniture items in each color index.\n"
+        "9. Color order (14 colors): [0:Green, 1:Brown, 2:Red, 3:Dark Yellow, 4:Orange, 5:Purple, 6:Pink, 7:Light Yellow, 8:Yellowish Brown, 9:Light Brown, 10:White, 11:Gray, 12:Blue, 13:Black].\n"
+        "10. Both color arrays must be exactly 14 integers summing to exactly 100.\n"
+        "11. STRICTLY EXCLUDE all electrical appliances (AC, washing machines, refrigerators, TVs, microwaves, etc.).\n"
+        "12. COHERENCE RULE (CRITICAL): If 'element_furniture[i]' is NOT empty, 'element_color[i]' MUST be > 0. If 'element_color[i]' is 0, 'element_furniture[i]' MUST be ''.\n"
+        "13. NO REPETITION & LIMIT: List at most 10 unique items per color string.\n"
+        "14. LIGHTING COMPENSATION (CRITICAL): Favor neutral colors like Gray (11), White (10), or Light Brown (9) for typical modern interiors unless a vibrant color is an explicit decorative choice."
     )
-    
-    contents = [prompt] + pil_images
-    
-    try:
-        # 🕒 Pacing
-        time.sleep(2)
-        response = client.models.generate_content(
-            model='gemini-3-flash-preview',
-            contents=contents,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=PropertyAnalysisResponse,
-                temperature=0.1
+
+    contents = [prompt] + image_parts
+
+    # 6. Gemini Analysis with retry
+    logger.info(f"🎬 Analyzing {property_id} with {len(image_parts)} images...")
+    res = None
+    for attempt in range(3):
+        try:
+            time.sleep(3)
+            response = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=PropertyAnalysisResponse,
+                    temperature=0.1
+                )
             )
-        )
-        res = response.parsed
-        
-        # 5. Format and Upload to Staff API
-        logger.info(f"🎨 Uploading AI Result to Staff API for Property {property_id}...")
-        
-        api.authenticate_staff() # Login as Staff
-        
-        raw_furniture = res.element_furniture
+            res = response.parsed
+            break
+        except Exception as e:
+            err_msg = str(e)
+            if ("503" in err_msg or "UNAVAILABLE" in err_msg or "429" in err_msg) and attempt < 2:
+                wait = (attempt + 1) * 10
+                logger.warning(f"⚠️ Gemini overloaded. Retry in {wait}s... (attempt {attempt+1}/3)")
+                time.sleep(wait)
+            else:
+                logger.error(f"❌ Gemini Error for {property_id}: {e}")
+                return
+
+    if not res:
+        logger.error(f"❌ No result from Gemini for {property_id}")
+        return
+
+    # 7. Post-process results
+    now_iso = (datetime.utcnow() + timedelta(hours=7)).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+
+    # คำนวณ house_color (อันดับ 1) และ house_color2 (อันดับ 2)
+    combined_colors = [
+        (res.room_color[i] if i < len(res.room_color) else 0)
+        + (res.element_color[i] if i < len(res.element_color) else 0)
+        for i in range(14)
+    ]
+    sorted_idx = sorted(range(14), key=lambda k: combined_colors[k], reverse=True)
+    house_color = ENGLISH_COLORS[sorted_idx[0]] if sum(combined_colors) > 0 else "Not Specified"
+    house_color2 = ENGLISH_COLORS[sorted_idx[1]] if sum(combined_colors) > 0 and combined_colors[sorted_idx[1]] > 0 else ""
+
+    # แมป poor condition image IDs
+    poor_image_ids = [
+        original_image_ids[idx]
+        for idx in res.poor_condition_image_indices
+        if 0 <= idx < len(original_image_ids)
+    ]
+
+    # 8. Save to Firestore
+    firestore_payload = {
+        "raw_room_color": res.raw_room_color,
+        "raw_furniture_color": res.raw_furniture_color,
+        "architect_style": res.architect_style,
+        "room_color": res.room_color,
+        "element_room": res.element_room,
+        "element_color": res.element_color,
+        "element_furniture": res.element_furniture,
+        "house_color": house_color,
+        "house_color2": house_color2,
+        "analyzed": True,
+        "analyzed_at": now_iso,
+        "uploaded": False,
+        "images_analyzed": len(image_parts),
+    }
+    if poor_image_ids:
+        firestore_payload["poor_condition_image_ids"] = poor_image_ids
+
+    try:
+        fs.db.collection(FIRESTORE_COLLECTION).document(str(property_id)).set(firestore_payload, merge=True)
+        logger.info(f"✅ Firestore updated for {property_id}")
+    except Exception as e:
+        logger.error(f"❌ Firestore update failed for {property_id}: {e}")
+
+    # 9. Upload to Staff API (color analysis payload - existing flow)
+    try:
+        api.authenticate_staff()
         formatted_furniture = []
-        for s in raw_furniture:
+        for s in res.element_furniture:
             if isinstance(s, str) and s.strip():
-                items = [item.strip() for item in s.split(",") if item.strip()]
-                formatted_furniture.append(items)
+                formatted_furniture.append([item.strip() for item in s.split(",") if item.strip()])
             else:
                 formatted_furniture.append([])
-                
-        # แมป Index ภาพที่เก่า/สกปรก กลับไปเป็น Image ID
-        poor_image_ids = []
-        for idx in res.poor_condition_image_indices:
-            if 0 <= idx < len(original_image_ids):
-                poor_image_ids.append(original_image_ids[idx])
 
-        # คำนวณสีรวม
-        combined_colors = []
-        for i in range(14):
-            r_val = res.room_color[i] if i < len(res.room_color) else 0
-            e_val = res.element_color[i] if i < len(res.element_color) else 0
-            combined_colors.append(r_val + e_val)
-            
-        sorted_idx = sorted(range(len(combined_colors)), key=lambda k: combined_colors[k], reverse=True)
-        dominant_color_thai = THAI_COLORS[sorted_idx[0]] if sum(combined_colors) > 0 else "ไม่ระบุ"
-        
-        from datetime import datetime, timedelta
-        now_thailand = datetime.utcnow() + timedelta(hours=7)
-        now_iso = now_thailand.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z' 
-
-        struct_payload = {
+        staff_payload = {
             "property_id": int(property_id),
             "analyzed_at": now_iso,
             "average_color_hex": "#FFFFFF",
-            "color": dominant_color_thai,
+            "color": house_color,
             "room_color": res.room_color,
             "furniture_color": res.element_color,
             "furniture_elements": formatted_furniture,
             "interior_style": res.architect_style,
-            "property_type": "house",
-            "poor_condition_image_ids": poor_image_ids # ⚠️ Staff API might need this field if supported
+            "property_type": "condo" if is_condo else "house",
+            "poor_condition_image_ids": poor_image_ids,
         }
-        
-        if api.submit_color_analysis(struct_payload):
-             logger.info(f"✅ [Task Completed] Successfully analyzed Property {property_id}")
-        else:
-             logger.error(f"❌ [Task Completed with Error] Failed to upload for {property_id}")
-             
-    except Exception as e:
-        logger.error(f"❌ [Task Failed] Gemini or API issue for {property_id}: {e}")
 
-# ----------------- Endpoint -----------------
+        if api.submit_color_analysis(staff_payload):
+            logger.info(f"✅ Staff API upload success for {property_id}")
+        else:
+            logger.error(f"❌ Staff API upload failed for {property_id}")
+    except Exception as e:
+        logger.error(f"❌ Staff API error for {property_id}: {e}")
+
+    # 10. Update Agent API: house_color + specifications (with fallback to Arnon account)
+    specs_payload = {"style": res.architect_style}
+    if existing_specs.get("floors"):
+        specs_payload["floors"] = existing_specs["floors"]
+    if existing_specs.get("bedrooms"):
+        specs_payload["bedrooms"] = existing_specs["bedrooms"]
+    if existing_specs.get("bathrooms"):
+        specs_payload["bathrooms"] = existing_specs["bathrooms"]
+
+    agent_update_payload = {
+        "house_color": house_color,
+        "specifications": specs_payload,
+    }
+
+    try_update_agent_api(property_id, agent_update_payload)
+
+    logger.info(f"🏁 [Task Completed] Property {property_id} fully processed.")
+
+
+# ==========================================================
+# Endpoint
+# ==========================================================
 @app.post("/api/analyze-property")
 async def trigger_property_analysis(req: AnalyzeRequest, background_tasks: BackgroundTasks):
     if not req.property_id:
         raise HTTPException(status_code=400, detail="property_id is required")
-        
+
     background_tasks.add_task(process_property_analysis, req.property_id)
-    
+
     return {
-        "success": True, 
+        "success": True,
         "message": f"Property ID {req.property_id} has been queued for AI Analysis.",
         "status": "processing_in_background"
     }
