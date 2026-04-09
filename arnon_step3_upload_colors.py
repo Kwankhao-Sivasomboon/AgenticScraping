@@ -7,7 +7,8 @@ from src.services.api_service import APIService
 
 load_dotenv()
 
-# ไม่ต้องระบุ START_ID/END_ID เครื่องจะดึงคิวงานจาก Firestore อัตโนมัติ (analyzed=True, uploaded=False)
+# ⚙️ ตั้งค่าคอลเลกชันที่ต้องการดึงข้อมูล (เปลี่ยนเป็น 'ARNON_properties' ได้ที่นี่)
+SOURCE_COLLECTION = "Launch_Properties"
 
 # Predefined 14 colors in Thai
 THAI_COLORS = [
@@ -25,9 +26,9 @@ def upload_arnon_analysis():
         print("Staff Authentication failed. Please check STAFF_API_EMAIL in .env")
         return
 
-    print("🚀 สแกนหาคิวงานอัปโหลดจาก 'Launch_Properties' (analyzed=True, uploaded=False)...")
+    print(f"🚀 สแกนหาคิวงานอัปโหลดจาก '{SOURCE_COLLECTION}' (analyzed=True, uploaded=False)...")
     
-    docs = fs.db.collection("Launch_Properties").where(filter=FieldFilter("analyzed", "==", True)).where(filter=FieldFilter("uploaded", "==", False)).get()
+    docs = fs.db.collection(SOURCE_COLLECTION).where(filter=FieldFilter("analyzed", "==", True)).where(filter=FieldFilter("uploaded", "==", False)).get()
 
     for doc in docs:
         prop_id = doc.id
@@ -83,7 +84,7 @@ def upload_arnon_analysis():
         }
         
         if api.submit_color_analysis(payload):
-            fs.db.collection("Launch_Properties").document(prop_id).update({
+            fs.db.collection(SOURCE_COLLECTION).document(prop_id).update({
                 "uploaded": True,
                 "uploaded_at": time.time()
             })

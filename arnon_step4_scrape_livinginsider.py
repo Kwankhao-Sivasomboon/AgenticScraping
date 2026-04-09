@@ -4,7 +4,7 @@ import time
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from google.cloud.firestore_v1.base_query import FieldFilter
+# from google.cloud.firestore_v1.base_query import FieldFilter
 
 import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -15,7 +15,7 @@ load_dotenv()
 def extract_livinginsider_data(url):
     """
     ดึงข้อมูลจากเว็บไซต์ LivingInsider
-    คืนค่าเป็น dict: { "built_year": int, "project_name": str, "address": str }
+    คืนค่าเป็น dict พร้อมข้อมูล: built_year, project_name, address, num_buildings, max_floors, total_units
     หรือ None ถ้าไม่พบข้อมูล
     """
     if "livinginsider.com" not in url.lower():
@@ -36,8 +36,7 @@ def extract_livinginsider_data(url):
             
         soup = BeautifulSoup(r.content, 'html.parser')
         
-        # เนื่องจากเราดึงโค้ด HTML มาโดยตรง (ไม่ได้ผ่าน Browser สด)
-        # ข้อมูลที่ซ่อนอยู่ (display: none) ใน box-show-text-all-project จะยังคงอยู่ใน Source Code
+        # ค้นหา <div class='box-show-text-all-project'> ทื่เก็บข้อมูลสรุปโครงการ
         target_div = soup.find('div', class_='box-show-text-all-project')
         
         if not target_div:
@@ -50,23 +49,34 @@ def extract_livinginsider_data(url):
         result = {}
         
         # 1. หารหัสปีที่สร้างเสร็จ
-        # สร้างเสร็จปี 2018
         year_match = re.search(r'สร้างเสร็จปี\s*(\d{4})', text)
         if year_match:
             result['built_year'] = int(year_match.group(1))
             
         # 2. หาชื่อโครงการ
-        # ข้อมูลเกี่ยวกับโครงการ [ชื่อ] มีสถานที่ตั้งโครงการอยู่ที่
         name_match = re.search(r'ข้อมูลเกี่ยวกับโครงการ\s+(.*?)\s+มีสถานที่ตั้งโครงการอยู่ที่', text)
         if name_match:
             result['project_name'] = name_match.group(1).strip()
             
         # 3. หาที่อยู่
-        # มีสถานที่ตั้งโครงการอยู่ที่ [ที่อยู่] จำนวนอาคาร
-        # หรือไปจนจบประโยคถ้าไม่มีคำว่า จำนวนอาคาร
         address_match = re.search(r'มีสถานที่ตั้งโครงการอยู่ที่\s+(.*?)(?=\s+จำนวนอาคาร|\s+สร้างเสร็จปี|$)', text)
         if address_match:
             result['address'] = address_match.group(1).strip()
+
+        # 4. จำนวนอาคาร (Building count)
+        building_match = re.search(r'จำนวนอาคารในโครงการนี้มีทั้งหมด\s*(\d+)\s*อาคาร', text)
+        if building_match:
+            result['num_buildings'] = int(building_match.group(1))
+
+        # 5. ความสูงชั้น (Floor count/Height)
+        floor_match = re.search(r'มีความสูง\s*(\d+)\s*ชั้น', text)
+        if floor_match:
+            result['max_floors'] = int(floor_match.group(1))
+
+        # 6. จำนวนยูนิตทั้งหมด (Total Units)
+        unit_match = re.search(r'มีจำนวนห้องพักอาศัยจำนวน\s*(\d+)\s*ยูนิต', text)
+        if unit_match:
+            result['total_units'] = int(unit_match.group(1))
             
         return result
         
@@ -76,7 +86,7 @@ def extract_livinginsider_data(url):
 
 def main():
     fs = FirestoreService()
-    print("🚀 เริ่มสแกนคิวงานจาก 'Leads' ทั้งหมด (ไม่สนใจ Status) เพื่อดึงข้อมูล LivingInsider...")
+    print("🚀 เริ่มสแกนคิวงานจาก 'Leads' ทั้งหมดเพื่อดึงข้อมูล LivingInsider ( built_year, address, floors, units, buildings )...")
     
     lead_docs = fs.db.collection("Leads").get()
     count_updated = 0
@@ -86,16 +96,15 @@ def main():
         lead_ref = lead_doc.reference
         lead_data = lead_doc.to_dict()
 
-        # ป้องกันการทำซ้ำ ถ้ามี built_year เป็นตัวเลขแล้วให้ข้าม (เปลี่ยนบรรทัดนี้ได้ถ้าอยากให้เขียนทับที่อยู่ด้วย)
-        if lead_data.get("built_year") is not None and lead_data.get("scraped_address"):
+        # ถ้ามีข้อมูลครบแล้ว (ปีที่สร้าง + ยูนิต + ชั้น) ให้ข้ามเพื่อประหยัดเวลา
+        if lead_data.get("built_year") and lead_data.get("scraped_max_floors") and lead_data.get("scraped_total_units"):
             continue
             
         # 1. ดึง Link
         target_url = lead_data.get("sheet_ลิงค์") or lead_data.get("url")
         
         if not target_url or "livinginsider" not in str(target_url).lower():
-            print(f"⚠️ Skip {prop_id}: ไม่ใช่ลิงก์ LivingInsider หรือไม่มีลิงก์")
-            # lead_ref.update({"built_year": None})
+            # print(f"⚠️ Skip {prop_id}: ไม่ใช่ลิงก์ LivingInsider")
             continue
             
         print(f"\n🏢 Property ID: {prop_id} | URL: {target_url}")
@@ -111,16 +120,19 @@ def main():
                 update_payload["scraped_project_name"] = scraped_data["project_name"]
             if "address" in scraped_data:
                 update_payload["scraped_address"] = scraped_data["address"]
+            if "num_buildings" in scraped_data:
+                update_payload["scraped_num_buildings"] = scraped_data["num_buildings"]
+            if "max_floors" in scraped_data:
+                update_payload["scraped_max_floors"] = scraped_data["max_floors"]
+            if "total_units" in scraped_data:
+                update_payload["scraped_total_units"] = scraped_data["total_units"]
                 
             lead_ref.update(update_payload)
             count_updated += 1
         else:
             print(f"   ❌ ไม่พบข้อมูลเป้าหมายในลิงก์นี้")
-            # ลองบันทึกว่าหาไม่เจอ
-            if lead_data.get("built_year") is None:
-                lead_ref.update({"built_year": None})
                 
-        time.sleep(2)
+        time.sleep(1.5)
 
     print(f"\n✅ ทำงานเสร็จสิ้น: อัปเดตข้อมูลสำเร็จทั้งหมด {count_updated} รายการ")
 

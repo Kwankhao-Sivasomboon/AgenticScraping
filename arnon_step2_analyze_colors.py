@@ -14,6 +14,9 @@ from src.services.api_service import APIService
 
 load_dotenv()
 
+# ⚙️ ตั้งค่าคอลเลกชันที่ต้องการบันทึกข้อมูล (เปลี่ยนเป็น 'ARNON_properties' ได้ที่นี่)
+TARGET_COLLECTION = "Launch_Properties"
+
 # English mapping for the 14 colors
 ENGLISH_COLORS = [
     "Green", "Brown", "Red", "Dark Yellow", "Orange", "Purple", "Pink", 
@@ -68,8 +71,8 @@ def analyze_arnon_properties():
     api.authenticate()
     
     # ดึงทั้งหมดที่ยังไม่ได้วิเคราะห์ (analyzed == False) หรือยังไม่มีฟิลด์ analyzed เลย
-    print("🚀 เริ่มดึงข้อมูลคิวงานวิเคราะห์สีจาก 'Launch_Properties' (analyzed=False/None)...")
-    docs = fs.db.collection("Launch_Properties").get()
+    print(f"🚀 เริ่มดึงข้อมูลคิวงานวิเคราะห์สีจาก '{TARGET_COLLECTION}' (analyzed=False/None)...")
+    docs = fs.db.collection(TARGET_COLLECTION).get()
     
     tasks = []
     total_docs = 0
@@ -83,7 +86,7 @@ def analyze_arnon_properties():
         else:
              analyzed_count += 1
     
-    print(f"📊 Total Docs in Launch_Properties: {total_docs}")
+    print(f"📊 Total Docs in {TARGET_COLLECTION}: {total_docs}")
     print(f"✅ Already Analyzed: {analyzed_count}")
     print(f"🎯 Tasks remaining to analyze: {len(tasks)}")
     
@@ -159,12 +162,12 @@ def analyze_arnon_properties():
             "Analyze these images of a SINGLE property to summarize its characteristics. The images are provided in a sequential list (Order: 0, 1, 2, ...).\n"
             "IMPORTANT: Images show the same rooms and furniture from DIFFERENT angles. DO NOT double-count items. "
             "1. Mental Mapping: Build a mental spatial map of the property. Identify unique furniture items (e.g., if you see the same blue bed in 3 photos, it counts as ONE blue bed).\n"
-            "   - 'poor_condition_image_indices': Identify and list integer indices (0-based) of images showing an old, unrenovated, poorly maintained, cluttered, or dirty room condition. If none, return [].\n"
+            "   - 'poor_condition_image_indices': Identify images showing SEVERE structural damage, highly unsanitary/dirty conditions, or extreme hoarding/clutter. DO NOT flag normal empty rooms, slightly older properties, or average lived-in spaces. BE EXTREMELY CONSERVATIVE. If in doubt, return [].\n"
             f"2. {style_instruction} You MUST choose EXACTLY ONE from this list: Modern, Nordic, Contemporary, Minimalist, Loft, Luxury, Other.\n"
             "3. 'raw_room_color': Provide detailed raw colors. Format exactly as: 'Walls: [color], Doors: [color], Floors: [color], Ceilings: [color]'.\n"
             "4. 'raw_furniture_color': Provide the true/raw colors of the furniture in a single string (e.g. 'Sofa: Emerald Green, Bed: Walnut').\n"
-            "5. 'room_color': Aggregate percentage (0-100) for ALL structural elements (Walls, Doors, Floors, Ceilings, and Roofs).\n"
-            "6. 'element_room': Array of 14 strings listing elements in each color index.\n"
+            "5. 'room_color': Aggregate percentage (0-100) for ALL structural elements (Walls, Doors, Floors, Ceilings).\n"
+            "6. 'element_room': Array of 14 strings. Each string 'i' contains ONLY elements from this strict list ['wall', 'door', 'floor', 'ceiling'] that appear in color index 'i'. DO NOT include any other words (no 'roof', no 'window', etc).\n"
             "7. 'element_color': Aggregate percentage (0-100) for Furniture.\n"
             "8. 'element_furniture': Array of 14 strings listing unique furniture items in each color index.\n"
             "9. Color order (14 colors): [0:Green, 1:Brown, 2:Red, 3:Dark Yellow, 4:Orange, 5:Purple, 6:Pink, 7:Light Yellow, 8:Yellowish Brown, 9:Light Brown, 10:White, 11:Gray, 12:Blue, 13:Black].\n"
@@ -240,7 +243,7 @@ def analyze_arnon_properties():
                 if poor_image_ids:
                     update_payload["poor_condition_image_ids"] = poor_image_ids
 
-                fs.db.collection("Launch_Properties").document(prop_id).update(update_payload)
+                fs.db.collection(TARGET_COLLECTION).document(prop_id).update(update_payload)
                 print(f"✅ Property {prop_id} Sync Success!")
                 success = True
                 time.sleep(2)
