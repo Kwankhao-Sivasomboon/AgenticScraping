@@ -6,19 +6,12 @@ import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
-# Primary: DuckDuckGo (ไม่มี Rate Limit เหมือน Google)
+# Primary: DuckDuckGo 
 try:
     from duckduckgo_search import DDGS
     USE_DDG = True
 except ImportError:
     USE_DDG = False
-
-# Fallback: Google Search
-try:
-    from googlesearch import search as google_search
-    USE_GOOGLE = True
-except ImportError:
-    USE_GOOGLE = False
 
 import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -26,260 +19,285 @@ from src.services.firestore_service import FirestoreService
 
 load_dotenv()
 
-# ⚙️ ตั้งค่าโหมดทดสอบ: ใส่จำนวนรายการที่ต้องการ หรือ None เพื่อรันทั้งหมด
-TEST_LIMIT = 1  # แก้เป็น None เพื่อรันทั้งหมด
+# ⚙️ ตั้งค่าโหมดทดสอบ
+TEST_LIMIT = None 
 
-def search_with_playwright(query):
+def scrape_zmyhome_data(project_name, property_type=""):
     """
-    ใช้ Playwright + Stealth เปิด Browser จริงเพื่อค้นหาบน Google
-    เป็น Fallback สุดท้ายเมื่อ DuckDuckGo และ Google API โดน Block
+    1. พิมพ์ทีละวรรคให้จบ
+    2. รอ Dropdown แสดงผล (1.5s)
+    3. เลือกอันที่คะแนนใกล้เคียงที่สุด (รองรับไทย-อังกฤษ)
+    4. ดึงข้อมูลแบบรวดเร็ว
     """
-    try:
-        from playwright.sync_api import sync_playwright
-        from playwright_stealth import stealth_sync
-    except ImportError:
-        print("      [!] Playwright/stealth ไม่ได้ติดตั้ง: pip install playwright playwright-stealth")
-        return []
-
-    results = []
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-            context = browser.new_context(viewport={"width": 1280, "height": 800})
-            page = context.new_page()
-            stealth_sync(page)
-
-            search_url = f"https://www.google.com/search?q={query.replace(' ', '+')}"
-            print(f"      🤖 [Playwright] Opening: {search_url}")
-            page.goto(search_url, wait_until="domcontentloaded", timeout=20000)
-            page.wait_for_timeout(2000)
-
-            # ดึง URL ทั้งหมดจากผลลัพธ์ Google
-            links = page.evaluate("""() => {
-                let anchors = Array.from(document.querySelectorAll('a[href]'));
-                return anchors.map(a => a.href).filter(h => h.startsWith('http') && !h.includes('google'));
-            }""")
-
-            results = [l for l in links if l]
-            browser.close()
-            print(f"      🤖 [Playwright] พบ {len(results)} ลิงก์")
-    except Exception as e:
-        print(f"      [!] Playwright search error: {e}")
-
-    return results
-
-def get_search_results(query, max_results=10):
-    """คืน list ของ URL จาก DuckDuckGo → Google → Playwright (fallback chain)"""
-    results = []
-    if USE_DDG:
-        try:
-            with DDGS() as ddgs:
-                for r in ddgs.text(query, max_results=max_results):
-                    href = r.get("href", "")
-                    if href:
-                        results.append(href)
-            if results:
-                return results
-        except Exception as e:
-            print(f"      [!] DuckDuckGo error: {e}")
-    if USE_GOOGLE:
-        try:
-            for j in google_search(query, num_results=max_results, lang="th"):
-                results.append(j)
-        except Exception as e:
-            print(f"      [!] Google search error: {e}")
-    if results:
-        return results
-
-    # สุดท้าย: ใช้ Playwright เปิด Browser จริงค้นบน Google
-    print("      🔄 ลองใช้ Playwright Browser เป็น fallback สุดท้าย...")
-    results = search_with_playwright(query)
-    return results
-
-
-def scrape_zmyhome_data(project_name):
-    query = f'site:zmyhome.com "{project_name}" โครงการ'
-    url = None
-
-    try:
-        engine = "DuckDuckGo" if USE_DDG else "Google"
-        print(f"      \U0001f50e Searching {engine}: '{query}'")
-        time.sleep(random.uniform(1.0, 3.0))
-        result_count = 0
-        for count, j in enumerate(get_search_results(query)):
-            result_count += 1
-            is_valid_zmyhome = "zmyhome.com" in j.lower()
-            is_project_page = any(x in j.lower() for x in ["/project/", "/condo/", "/house/", "/townhome/", "/townhouse/"])
-            is_generic_list = any(x in j.lower() for x in ["/project-list/", "/search/", "?search", "/projects-for-sale"])
-            status = "\u2705 MATCH" if (is_valid_zmyhome and is_project_page and not is_generic_list) else f"\u26d4 SKIP (zmyhome={is_valid_zmyhome}, project_page={is_project_page}, generic={is_generic_list})"
-            print(f"      \U0001f517 [{count+1}] {j}")
-            print(f"           \u2192 {status}")
-            if is_valid_zmyhome and is_project_page and not is_generic_list:
-                url = j
-                break
-        if result_count == 0:
-            print("      \u26a0\ufe0f  \u0e04\u0e37\u0e19 0 \u0e1c\u0e25 \u2014 \u0e2d\u0e32\u0e08\u0e42\u0e14\u0e19 Rate Limit \u0e2b\u0e23\u0e37\u0e2d IP \u0e16\u0e39\u0e01 Block")
-        elif not url:
-            print(f"      \u26a0\ufe0f  \u0e04\u0e37\u0e19 {result_count} \u0e1c\u0e25 \u0e41\u0e15\u0e48\u0e44\u0e21\u0e48\u0e21\u0e35 ZmyHome project URL \u0e15\u0e23\u0e07")
-    except Exception as e:
-        err_msg = str(e)
-        if "429" in err_msg or "Too Many Requests" in err_msg:
-            raise
-        print(f"      [!] Search error: {e}")
-        return None
-
-    if not url:
-        return None
-
-    print(f"      🌐 Target ZmyHome URL: {url}")
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+    print(f"      🔎 Searching ON ZmyHome: '{project_name}'")
     
     try:
-        r = requests.get(url, headers=headers, timeout=10)
-        if r.status_code == 200:
-            soup = BeautifulSoup(r.content, 'html.parser')
-            result = {}
-            
-            # เจาะจงหาคลาส ul เฉพาะของข้อมูลโครงการเลย เพื่อความชัวร์ที่สุด
-            container = soup.find('ul', class_='info-project__list')
-            search_items = container.find_all('li') if container else soup.find_all('li', class_=lambda c: c and 'info-project__item' in c)
-            
-            # ถ้าหาไม่เจอจริงๆ ขอกวาด li ทั้งหมด
-            if not search_items:
-                search_items = soup.find_all('li')
+        from playwright.sync_api import sync_playwright
+        from playwright_stealth import Stealth
+    except ImportError as e:
+        print(f"      [!] Playwright Error: {e}")
+        return None
 
-            for li in search_items:
-                # ลองดึงจาก span.small และ strong.label ตรงๆ ตามโครงสร้าง HTML ของ ZmyHome
+    res = {}
+    target_url = None
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=False, args=["--no-sandbox", "--disable-blink-features=AutomationControlled"])
+            context = browser.new_context(viewport={"width": 1280, "height": 800})
+            Stealth().apply_stealth_sync(context)
+            page = context.new_page()
+
+            # 1. เข้าหน้าเว็บ
+            page.goto("https://zmyhome.com/project", wait_until="domcontentloaded", timeout=30000)
+            
+            # จัดการ Cookie (อิงจาก Codegen ของแท้)
+            try: page.get_by_role("button", name="ยอมรับทั้งหมด").click(timeout=3000)
+            except: pass
+
+            # ฟังก์ชันตัวช่วยปิด Google Ads เด้งขวางหน้าจอ (Vignette Ads) แบบที่เจอใน Codegen
+            def close_annoying_ads():
+                try:
+                    for iframe in page.frames:
+                        close_btn = iframe.locator("text='ปิดโฆษณา'").first
+                        if close_btn.count() > 0: close_btn.click(timeout=1000)
+                        
+                        close_en = iframe.locator("[aria-label='Close ad']").first
+                        if close_en.count() > 0: close_en.click(timeout=1000)
+                except: pass
+
+            close_annoying_ads()
+
+            # 2. แปลไทยกันเหนียว (ถ้าชื่อเป็นอังกฤษ)
+            thai_project_name = ""
+            if any(c.isalpha() for c in project_name):
+                try:
+                    from google import genai
+                    api_key = os.getenv('GEMINI_API_KEY')
+                    if api_key:
+                        client = genai.Client(api_key=api_key)
+                        prompt = f"Property: '{project_name}'. Give ONLY Thai name used on ZmyHome."
+                        resp = client.models.generate_content(model='gemini-2.0-flash', contents=prompt)
+                        thai_project_name = resp.text.strip().replace("'", "").replace('"', "")
+                        print(f"      🌐 Translated: '{thai_project_name}'")
+                except Exception as e:
+                    print(f"      [!] Translation Error: {e}")
+
+            # 3. เริ่มค้นหาจำลองมนุษย์แบบพิมพ์ทีละวรรค
+            search_words = re.split(r'[\s\-]+', project_name.strip())
+            search_words = [w for w in search_words if w]
+            import difflib
+            
+            target_text_for_match = ""
+            current_query = ""
+
+            for i, word in enumerate(search_words):
+                is_last_word = (i == len(search_words) - 1)
+                full_word_to_type = word if is_last_word else word + " "
+                current_query += full_word_to_type
+                
+                print(f"      ⌨️ Typing: '{word}'...")
+                
+                # ถ้ามีโฆษณาแทรกระหว่างพิมพ์ โฟกัสจะหลุด และSpacebarจะกลายเป็นเลื่อนหน้าจอ! ต้องฆ่าโฆษณาก่อน
+                close_annoying_ads()
+                
+                # ใช้ตัวตบตาพิมพ์ข้อความด้วย Vanilla JS + ปลุก jQuery ให้ Dropdown กางโดยไม่เลื่อนจอ
+                page.evaluate(f'''(query) => {{
+                    return new Promise((resolve) => {{
+                        let el = document.getElementById("keyword");
+                        if(el) {{
+                            el.value = query;
+                            // ทะลวงเข้า jQuery ของ ZmyHome ปลุก Dropdown ให้กาง 100% แบบไม่มีการเลื่อนจอ
+                            if (window.jQuery && $(el).data('ui-autocomplete')) {{
+                                $(el).autocomplete("search", query);
+                            }} else if (window.jQuery) {{
+                                $(el).trigger("keydown");
+                            }}
+                        }}
+                        setTimeout(resolve, 500); // พักรอให้ JS ทำงาน
+                    }});
+                }}''', current_query)
+                
+                page.wait_for_timeout(2500)  # รอ Dropdown กาง
+
+                # ดึงข้อมูล Dropdown
+                dropdown_items = page.evaluate('''() => {
+                    let results = [];
+                    let items = document.querySelectorAll("div.result-detail");
+                    for (let n = 0; n < items.length; n++) {
+                        let h4 = items[n].querySelector("h4.list-name");
+                        let txt = h4 ? h4.innerText : items[n].innerText;
+                        if (txt && txt.trim()) results.push({ text: txt.trim() });
+                    }
+                    return results;
+                }''')
+
+                if not dropdown_items:
+                    continue # ยังไม่ขึ้นเลย พิมพ์ต่อ
+
+                # กฎเหล็ก: ถ้าตัวเลือกมากกว่า 5 รายการ และยังไม่ถึงคำสุดท้าย -> พิมพ์ต่อเพื่อบีบผลลัพธ์
+                if len(dropdown_items) > 5 and not is_last_word:
+                    print(f"      ⏳ Many results ({len(dropdown_items)}), typing next word...")
+                    continue
+
+                # มี <= 5 รายการ หรือพิมพ์จนหมดคำแล้ว -> เลือกอันที่ดีที่สุด
+                best_text, best_score = "", 0
+                for item in dropdown_items:
+                    txt = item['text']
+                    sc_en = difflib.SequenceMatcher(None, project_name.lower(), txt.lower()).ratio()
+                    sc_th = difflib.SequenceMatcher(None, thai_project_name.lower(), txt.lower()).ratio() if thai_project_name else 0
+                    score = max(sc_en, sc_th)
+                    if score > best_score:
+                        best_score, best_text = score, txt
+                
+                # ถ้าคะแนนน้อยมาก (เช่น หาด้วย Eng แต่เว็บคืนค่ามาเป็นภาษาไทย) ให้เชื่อใจผลการค้นหาของ ZmyHome อันดับที่ 1
+                if best_score < 0.3:
+                    print(f"      ⚠️ Text mismatch score ({best_score:.2f}). Trusting ZmyHome's top result!")
+                    best_text = dropdown_items[0]['text']
+                    best_score = 1.0 # บังคับให้ผ่าน
+                
+                print(f"      🎯 Selecting: '{best_text}'")
+                target_text_for_match = best_text
+                
+                # 4. คลิกหัวข้อใน Dropdown
+                try:
+                    page.get_by_role("heading", name=best_text).first.click(timeout=3000)
+                except:
+                    try: page.locator(f"h4.list-name:has-text('{best_text}')").first.click(timeout=3000)
+                    except: pass
+                
+                page.wait_for_timeout(3000)
+                close_annoying_ads()
+                break
+
+            if not target_text_for_match:
+                print("      ⌨️ ⚠️ No reliable match found. Skipping.")
+                browser.close()
+                return None
+
+            best_text = target_text_for_match # ส่งต่อให้ logic ตรวจสอบหน้า Result
+            
+            # 5. ตรวจสอบว่าตกไปหน้า Result ปลายทางไหน
+            target_url = None
+            if "/project/" in page.url:
+                target_url = page.url
+            else:
+                print("      🗺️ Landed on search results. Finding exact match...")
+                # ตาม Codegen: พยายามดึงลิงก์ที่ตรงชื่อเป๊ะๆ แบบที่บอสคลิก
+                try:
+                    exact_link = page.get_by_role("link", name=best_text).filter(has_attribute="href").first
+                    if exact_link.count() > 0:
+                        href = exact_link.get_attribute("href")
+                        if href and "/project/" in href:
+                            target_url = href if "http" in href else "https://zmyhome.com" + href
+                except: pass
+                
+                # Fallback กรณี role หาไม่เจอ
+                if not target_url:
+                    result_links = page.locator("span.label a").all()
+                    for r_link in result_links:
+                        if r_link.evaluate("el => el.innerText").strip() == best_text: 
+                            href = r_link.get_attribute("href")
+                            if href:
+                                target_url = href if "http" in href else "https://zmyhome.com" + href
+                                break
+            
+            if not target_url:
+                print(f"      ❌ Could not navigate to project page for '{best_text}'")
+                browser.close()
+                return None
+
+            # 6. ดึงข้อมูล
+            print(f"      ✅ MATCH URL: {target_url}")
+            page.goto(target_url, wait_until="domcontentloaded", timeout=20000)
+            close_annoying_ads() # ฆ่าโฆษณาก่อนดึง UI
+
+            if not target_url:
+                print("      ⌨️ ⚠️ No reliable match. Skipping.")
+                browser.close()
+                return None
+
+            # 6. ดึงข้อมูล
+            print(f"      ✅ MATCH URL: {target_url}")
+            page.goto(target_url, wait_until="domcontentloaded", timeout=20000)
+            close_annoying_ads() # ฆ่าโฆษณาก่อนดึง UI
+
+            try: page.wait_for_selector("ul.info-project__list", timeout=5000)
+            except: pass
+            
+            actual_name = page.locator("h1").inner_text().strip()
+            print(f"      🏢 Verify: '{actual_name}'")
+            
+            # ตรวจสอบขั้นสุดท้าย (65% เพื่อให้ คันทรี่ คอมเพล็กซ์ ผ่านได้)
+            if difflib.SequenceMatcher(None, project_name.lower(), actual_name.lower()).ratio() < 0.55 and project_name.lower() not in actual_name.lower():
+                 print(f"      ❌ Match Failed! ({actual_name})")
+                 browser.close()
+                 return None
+
+            soup = BeautifulSoup(page.content(), 'html.parser')
+            browser.close()
+            
+            # -- Parse Specs --
+            container = soup.find('ul', class_='info-project__list')
+            li_items = container.find_all('li') if container else []
+            for li in li_items:
                 label_tag = li.find('span', class_='small')
                 value_tag = li.find('strong', class_=lambda c: c and 'label' in str(c))
-                
-                label = ""
-                val_text = ""
-                
                 if label_tag and value_tag:
-                    label = label_tag.get_text(strip=True)
-                    val_text = value_tag.get_text(strip=True)
-                else:
-                    # Fallback: แยกคำ
-                    raw_txt = li.get_text(separator='|', strip=True)
-                    parts = [p.strip() for p in raw_txt.split('|') if p.strip()]
-                    if len(parts) >= 2:
-                        label = parts[0]
-                        val_text = " ".join(parts[1:])
+                    label, val = label_tag.get_text(strip=True), value_tag.get_text(strip=True)
+                    if "ปีที่สร้างเสร็จ" in label: res["built_year"] = int(re.search(r'(\d{4})', val).group(1)) if re.search(r'(\d{4})', val) else None
+                    elif "ราคาเปิดตัว" in label: res["launch_price"] = val
+                    elif "ยูนิตทั้งหมด" in label: res["total_units"] = val
+                    elif "พื้นที่จอดรถ" in label: res["parking"] = val
+                    elif "จำนวนชั้น" in label: res["max_floors"] = val
                 
-                if not label or not val_text or val_text.upper() == "N/A" or val_text == "-":
-                    continue
-                
-                print(f"      📍 Found Section: [{label}] -> {val_text}")
-                    
-                if "ปีที่สร้างเสร็จ" in label or "สร้างเสร็จปี" in label:
-                    year_match = re.search(r'(\d{4})', val_text)
-                    if year_match:
-                        y = int(year_match.group(1))
-                        if y > 2400: y -= 543
-                        result["built_year"] = y
-                elif "จำนวนตึก" in label:
-                    m = re.search(r'(\d+)', val_text)
-                    if m: result["num_buildings"] = int(m.group(1))
-                elif "จำนวนชั้น" in label:
-                    m = re.search(r'(\d+)', val_text)
-                    if m: result["max_floors"] = int(m.group(1))
-                elif "ยูนิตทั้งหมด" in label:
-                    m = re.search(r'(\d+)', val_text.replace(',', ''))
-                    if m: result["total_units"] = int(m.group(1))
-                elif "พื้นที่จอดรถ" in label:
-                    result["parking"] = val_text
-                elif "ค่าส่วนกลาง" in label:
-                    result["common_fee"] = val_text
-                elif "ราคาเปิดตัว" in label:
-                    result["launch_price"] = val_text
+                txt = li.get_text(strip=True)
+                if "ผู้พัฒนา :" in txt: res["developer"] = txt.replace("ผู้พัฒนา :", "").strip()
+            
+            facs = [s.get_text(strip=True) for s in soup.find('div', class_='facality').find_all('span', class_='label')] if soup.find('div', class_='facality') else []
+            if facs: res["facilities"] = facs
+            
+            return res if res else None
 
-            # --- ดึง Facility List จาก div.facality ---
-            fac_div = soup.find('div', class_=lambda c: c and 'facality' in c)
-            if fac_div:
-                fac_ul = fac_div.find('ul', class_=lambda c: c and 'fac-icon' in str(c))
-                if fac_ul:
-                    facilities = []
-                    for li in fac_ul.find_all('li'):
-                        label_span = li.find('span', class_='label')
-                        if label_span:
-                            fac_text = label_span.get_text(strip=True)
-                            if fac_text:
-                                facilities.append(fac_text)
-                    if facilities:
-                        result["facilities"] = facilities
-                        print(f"      🏊 Facilities found: {facilities}")
-
-            if result:
-                print(f"      🎉 Final Scraped Result: {result}")
-                return result
-                
-            # Fallback Regex สุดท้ายถ้าไม่เจอในตาราง
-            all_text = soup.get_text(separator=' ')
-            match = re.search(r'(?:ปีที่สร้างเสร็จ|สร้างเสร็จปี).*?(\d{4})', all_text)
-            if match:
-                y = int(match.group(1))
-                if y > 2400: y -= 543
-                return {"built_year": y}
-                
     except Exception as e:
-        print(f"      [!] Error scraping {url}: {e}")
-        
-    return None
+        print(f"      [!] Error: {e}")
+        return None
 
 def main():
+    print(f"🔐 Firestore: Initializing...")
     fs = FirestoreService()
-    mode_text = f"TEST MODE (จำกัดแค่ {TEST_LIMIT} รายการ)" if TEST_LIMIT else "FULL MODE (ทั้งหมด)"
-    print(f"🚀 เริ่มสแกน ZmyHome [{mode_text}]...")
-    lead_docs = fs.db.collection("Leads").stream()
-    count_updated = 0
-    count_processed = 0
-    for lead_doc in lead_docs:
-        prop_id = lead_doc.id
-        lead_ref = lead_doc.reference
-        lead_data = lead_doc.to_dict()
+    docs = fs.db.collection("Leads").get()
+    projects_map = {}
+    skipped = 0
 
-        if lead_data.get("zmyh_built_year") and lead_data.get("zmyh_total_units"):
+    for doc in docs:
+        data = doc.to_dict()
+        if data.get("zmyh_built_year"):
+            skipped += 1
             continue
             
-        project_name = lead_data.get("sheet_ชื่อโครงการ")
-        if not project_name or str(project_name).strip().lower() in ["none", "null", "", "-", "ไม่ระบุ"]:
-            eval_data = lead_data.get("evaluation", {})
-            if isinstance(eval_data, dict):
-                project_name = eval_data.get("project_name")
-        if not project_name or str(project_name).strip().lower() in ["none", "null", "", "-", "ไม่ระบุ"]:
-            continue
-            
-        print(f"🏢 Doc: {prop_id} | Project: {project_name}")
-        try:
-            scraped_data = scrape_zmyhome_data(project_name)
-            if scraped_data:
-                print(f"   🎉 Success! Updated with ZmyHome Fallback Data.")
-                update_payload = {f"zmyh_{k}": v for k, v in scraped_data.items()}
-                lead_ref.update(update_payload)
-                count_updated += 1
-            else:
-                print(f"   ❌ No data found on ZmyHome page.")
-        except Exception as e:
-            err_msg = str(e)
-            if "429" in err_msg or "Too Many Requests" in err_msg:
-                print(f"   ⚠️ Error 429! Backing off for 60s...")
-                time.sleep(60)
-            else:
-                print(f"   ❌ Error: {e}")
+        p_name = data.get("project_name") or data.get("sheet_ชื่อโครงการ") or (data.get("evaluation", {}).get("project_name") if isinstance(data.get("evaluation"), dict) else None)
+        if not p_name or str(p_name).strip().lower() in ["none", "null", ""]: continue
         
-        count_processed += 1
-        if TEST_LIMIT and count_processed >= TEST_LIMIT:
-            print(f"\n✋ หยุด: ครบ {TEST_LIMIT} รายการตาม TEST_LIMIT แล้ว")
-            break
+        p_name = str(p_name).strip()
+        if p_name not in projects_map: projects_map[p_name] = []
+        projects_map[p_name].append(doc)
 
-        sleep_time = random.randint(5, 12)
-        print(f"   ⏳ Waiting {sleep_time}s...")
-        time.sleep(sleep_time)
+    print(f"📊 Projects: {len(projects_map)} (Skipped: {skipped})")
 
-    print(f"✅ Scraping finished. Total ZmyHome fallback records: {count_updated}")
+    p_count = 0
+    for p_name, p_docs in projects_map.items():
+        if TEST_LIMIT and p_count >= TEST_LIMIT: break
+        print(f"🏢 Project: {p_name} ({len(p_docs)} leads)")
+        
+        scraped = scrape_zmyhome_data(p_name)
+        if scraped:
+            payload = {f"zmyh_{k}": v for k, v in scraped.items()}
+            print(f"   ✅ Found Specs: {list(payload.keys())}")
+            for doc in p_docs: doc.reference.update(payload)
+        else: print(f"   ❌ No data.")
+        
+        p_count += 1
+        time.sleep(1)
 
 if __name__ == "__main__":
     main()

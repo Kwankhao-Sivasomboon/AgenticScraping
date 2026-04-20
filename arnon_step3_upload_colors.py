@@ -44,9 +44,18 @@ def upload_arnon_analysis():
             else:
                 formatted_furniture.append([])
         
-        # 2. Determine dominant color Thai name
+        # 2. Determine dominant color Thai name using 70/30 weighting
+        # (Room Color 70% / Furniture Color 30%)
+        room_colors = data.get("room_color", [0]*14)
         furniture_colors = data.get("element_color", [0]*14)
-        max_idx = furniture_colors.index(max(furniture_colors)) if any(furniture_colors) else 10
+        
+        weighted_colors = []
+        for i in range(14):
+            # สูตร: (โครงสร้าง * 0.7) + (เฟอร์นิเจอร์ * 0.3)
+            val = (room_colors[i] * 0.7) + (furniture_colors[i] * 0.3)
+            weighted_colors.append(val)
+            
+        max_idx = weighted_colors.index(max(weighted_colors)) if any(weighted_colors) else 10
         dominant_color_thai = THAI_COLORS[max_idx]
 
         # 3. Handle structural elements (walls, floors, etc.)

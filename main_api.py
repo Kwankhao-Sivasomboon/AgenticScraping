@@ -55,10 +55,27 @@ class PropertyAnalysisResponse(BaseModel):
 # ==========================================================
 # Helpers
 # ==========================================================
-def download_image_as_part(url: str):
-    """Download and compress image as Gemini Part (ตรงกับ arnon_step2)"""
+def download_image_as_part(url: str, custom_headers: dict = None):
+    """Download and compress image as Gemini Part (เนียนเป็น Browser เพื่อเลี่ยง 403)"""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9,th;q=0.8",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Sec-Fetch-Dest": "image",
+        "Sec-Fetch-Mode": "no-cors",
+        "Sec-Fetch-Site": "same-site",
+    }
+    if custom_headers:
+        headers.update(custom_headers)
+        
     try:
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        # ลองดาวน์โหลดรูปภาพ
+        r = requests.get(url, headers=headers, timeout=20)
         if r.status_code == 200:
             img = Image.open(BytesIO(r.content))
             if img.mode != 'RGB':
@@ -68,18 +85,17 @@ def download_image_as_part(url: str):
             img.save(buffer, format="JPEG", quality=80)
             return types.Part.from_bytes(data=buffer.getvalue(), mime_type='image/jpeg')
         else:
-            logger.warning(f"[!] Download failed: Status {r.status_code} for {url}")
+            logger.warning(f"[!] Download failed: Status {r.status_code} for URL (Referer: {headers.get('Referer')})")
     except Exception as e:
         logger.warning(f"[!] Download error: {e}")
     return None
 
 
-def try_update_agent_api(property_id: int, payload: dict) -> bool:
+def try_update_agent_api(property_id: int, payload: dict) -> str:
     """
-    พยายามอัปเดต Agent API ด้วย Primary credential ก่อน →
-    ถ้าล้มเหลว ให้ fallback ไปใช้ AGENT_ARNON credentials
+    พยายามอัปเดต Agent API และคืนค่า 'primary', 'arnon' หรือ None ตามบัญชีที่สำเร็จ
     """
-    # Primary account (AGENT_API_EMAIL / AGENT_API_PASSWORD)
+    # Primary account
     api_primary = APIService(
         email=os.getenv('AGENT_API_EMAIL'),
         password=os.getenv('AGENT_API_PASSWORD')
@@ -87,10 +103,10 @@ def try_update_agent_api(property_id: int, payload: dict) -> bool:
     if api_primary.authenticate():
         if api_primary.update_property(str(property_id), payload):
             logger.info(f"✅ Agent API updated with primary account for {property_id}")
-            return True
-        logger.warning(f"⚠️ Primary account failed to update property {property_id}, trying Arnon account...")
+            return "primary"
+        logger.warning(f"⚠️ Primary account failed to update {property_id}, trying Arnon account...")
 
-    # Fallback account (AGENT_ARNON_EMAIL / AGENT_ARNON_PASSWORD)
+    # Fallback to Arnon account
     arnon_email = os.getenv('AGENT_ARNON_EMAIL')
     arnon_password = os.getenv('AGENT_ARNON_PASSWORD')
     if arnon_email and arnon_password:
@@ -98,10 +114,10 @@ def try_update_agent_api(property_id: int, payload: dict) -> bool:
         if api_arnon.authenticate():
             if api_arnon.update_property(str(property_id), payload):
                 logger.info(f"✅ Agent API updated with Arnon account for {property_id}")
-                return True
+                return "arnon"
 
     logger.error(f"❌ Agent API update failed for {property_id} (both accounts tried)")
-    return False
+    return None
 
 
 def parse_specs_from_property(prop_data: dict) -> dict:
@@ -176,15 +192,26 @@ def process_property_analysis(property_id: int):
     except Exception as e:
         logger.warning(f"⚠️ URL refresh failed: {e}")
 
-    # 4. Download & compress images (ตรงกับ arnon_step2)
+    # 4. Download & compress images (ใช้ Signed URL ที่ได้จาก refreshing)
     image_parts = []
     original_image_ids = []
+    
+    # ดึงค่า Domain จาก API Base URL เพื่อทำ Referer ป้องกัน 403
+    api_domain = api.base_url.split("//")[-1].split("/")[0]
+    download_headers = {
+        "Referer": f"https://{api_domain}/",
+        "Accept": "image/webp,image/apng,image/*,*/*;q=0.8"
+    }
+
     for img_meta in gallery_images[:15]:
-        img_url = url_map.get(str(img_meta.get("id"))) or img_meta.get("url")
-        part = download_image_as_part(img_url)
+        img_id_str = str(img_meta.get("id"))
+        # สำคัญ: ต้องใช้ Signed URL จาก map ที่เราเพิ่ง Refresh มา (ถ้ามี)
+        img_url = url_map.get(img_id_str) or img_meta.get("url")
+        
+        part = download_image_as_part(img_url, custom_headers=download_headers)
         if part:
             image_parts.append(part)
-            original_image_ids.append(str(img_meta.get("id")))
+            original_image_ids.append(img_id_str)
 
     if not image_parts:
         logger.error(f"❌ Could not download any images for Property {property_id}")
@@ -225,7 +252,7 @@ def process_property_analysis(property_id: int):
         try:
             time.sleep(3)
             response = client.models.generate_content(
-                model='gemini-2.5-flash',
+                model='gemini-3-flash-preview',
                 contents=contents,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
@@ -253,9 +280,11 @@ def process_property_analysis(property_id: int):
     now_iso = (datetime.utcnow() + timedelta(hours=7)).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
 
     # คำนวณ house_color (อันดับ 1) และ house_color2 (อันดับ 2)
+    # ให้น้ำหนักสีของห้อง (room) 70% และสีของเฟอร์นิเจอร์ (element) 30%
+    # เพราะโครงสร้างห้อง (พื้น, ผนัง, เพดาน) มีพื้นที่นำสายตาและส่งผลต่อสีหลักมากกว่าเฟอร์นิเจอร์
     combined_colors = [
-        (res.room_color[i] if i < len(res.room_color) else 0)
-        + (res.element_color[i] if i < len(res.element_color) else 0)
+        ((res.room_color[i] if i < len(res.room_color) else 0) * 0.7)
+        + ((res.element_color[i] if i < len(res.element_color) else 0) * 0.3)
         for i in range(14)
     ]
     sorted_idx = sorted(range(14), key=lambda k: combined_colors[k], reverse=True)
@@ -269,32 +298,67 @@ def process_property_analysis(property_id: int):
         if 0 <= idx < len(original_image_ids)
     ]
 
-    # 8. Save to Firestore
-    firestore_payload = {
-        "raw_room_color": res.raw_room_color,
-        "raw_furniture_color": res.raw_furniture_color,
-        "architect_style": res.architect_style,
-        "room_color": res.room_color,
-        "element_room": res.element_room,
-        "element_color": res.element_color,
-        "element_furniture": res.element_furniture,
+    # 8. Update Agent API First: เพื่อดูว่าสำเร็จที่ Account ไหน จะได้เลือก Collection ใน Firestore ถูก
+    specs_payload = {"style": res.architect_style}
+    if existing_specs.get("floors"):
+        specs_payload["floors"] = existing_specs["floors"]
+    if existing_specs.get("bedrooms"):
+        specs_payload["bedrooms"] = existing_specs["bedrooms"]
+    if existing_specs.get("bathrooms"):
+        specs_payload["bathrooms"] = existing_specs["bathrooms"]
+
+    agent_update_payload = {
         "house_color": house_color,
-        "house_color2": house_color2,
-        "analyzed": True,
-        "analyzed_at": now_iso,
-        "uploaded": False,
-        "images_analyzed": len(image_parts),
+        "specifications": specs_payload,
     }
-    if poor_image_ids:
-        firestore_payload["poor_condition_image_ids"] = poor_image_ids
 
-    try:
-        fs.db.collection(FIRESTORE_COLLECTION).document(str(property_id)).set(firestore_payload, merge=True)
-        logger.info(f"✅ Firestore updated for {property_id}")
-    except Exception as e:
-        logger.error(f"❌ Firestore update failed for {property_id}: {e}")
+    used_account = try_update_agent_api(property_id, agent_update_payload)
+    
+    if not used_account:
+        logger.warning(f"⚠️ Skipping Firestore save for {property_id} because Agent API update failed for all accounts.")
+    else:
+        target_collection = "ARNON_properties" if used_account == "arnon" else "Leads"
 
-    # 9. Upload to Staff API (color analysis payload - existing flow)
+        # 9. Save to Firestore (ใช้ Collection ตาม Account ที่อัปเดตสำเร็จ)
+        raw_color_output = ", ".join([f"{ENGLISH_COLORS[i]}: {int(combined_colors[i])}" for i in range(14) if combined_colors[i] > 0])
+        
+        firestore_payload = {
+            "raw_room_color": res.raw_room_color,
+            "raw_furniture_color": res.raw_furniture_color,
+            "raw_color": raw_color_output,
+            "architect_style": res.architect_style,
+            "room_color": res.room_color,
+            "element_room": res.element_room,
+            "element_color": res.element_color,
+            "element_furniture": res.element_furniture,
+            "house_color": house_color,
+            "house_color2": house_color2,
+            "analyzed": True,
+            "analyzed_at": now_iso,
+            "uploaded": True, # สำเร็จแน่นอนเพราะ used_account ไม่เป็น None
+            "images_analyzed": len(image_parts),
+        }
+        if poor_image_ids:
+            firestore_payload["poor_condition_image_ids"] = poor_image_ids
+
+        try:
+            doc_ref = fs.db.collection(target_collection).document(str(property_id))
+            
+            # ถ้าเป็น Leads ต้องค้นหาหาเอกสารที่มี api_property_id ตรงกันก่อน
+            if target_collection == "Leads":
+                query = fs.db.collection("Leads").where("api_property_id", "==", int(property_id)).limit(1).get()
+                if query:
+                    doc_ref = query[0].reference
+                    logger.info(f"🔍 Found existing document in Leads for api_property_id {property_id}")
+                else:
+                    logger.warning(f"⚠️ Document with api_property_id {property_id} NOT found in Leads. Creating new with ID {property_id}.")
+
+            doc_ref.set(firestore_payload, merge=True)
+            logger.info(f"✅ Firestore updated in '{target_collection}' for {property_id}")
+        except Exception as e:
+            logger.error(f"❌ Firestore update failed for {property_id}: {e}")
+
+    # 10. Upload to Staff API (color analysis payload - existing flow)
     try:
         api.authenticate_staff()
         formatted_furniture = []
