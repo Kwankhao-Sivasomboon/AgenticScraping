@@ -113,11 +113,11 @@ def scrape_zmyhome_data(project_name, property_type=""):
                                 $(el).trigger("keydown");
                             }}
                         }}
-                        setTimeout(resolve, 500); // พักรอให้ JS ทำงาน
+                        setTimeout(resolve, 200); // พักรอให้ JS ทำงาน
                     }});
                 }}''', current_query)
                 
-                page.wait_for_timeout(2500)  # รอ Dropdown กาง
+                page.wait_for_timeout(1500)  # รอ Dropdown กาง (ลดเวลาเพื่อให้เร็วขึ้น)
 
                 # ดึงข้อมูล Dropdown
                 dropdown_items = page.evaluate('''() => {
@@ -206,32 +206,33 @@ def scrape_zmyhome_data(project_name, property_type=""):
                 browser.close()
                 return None
 
-            # 6. ดึงข้อมูล
+            # 6. ดึงข้อมูลให้ไวขึ้น (Fast Extraction)
             print(f"      ✅ MATCH URL: {target_url}")
             page.goto(target_url, wait_until="domcontentloaded", timeout=20000)
             close_annoying_ads() # ฆ่าโฆษณาก่อนดึง UI
-
-            if not target_url:
-                print("      ⌨️ ⚠️ No reliable match. Skipping.")
-                browser.close()
-                return None
-
-            # 6. ดึงข้อมูล
-            print(f"      ✅ MATCH URL: {target_url}")
-            page.goto(target_url, wait_until="domcontentloaded", timeout=20000)
-            close_annoying_ads() # ฆ่าโฆษณาก่อนดึง UI
-
-            try: page.wait_for_selector("ul.info-project__list", timeout=5000)
-            except: pass
             
-            actual_name = page.locator("h1").inner_text().strip()
+            try:
+                page.wait_for_selector("ul.info-project__list", timeout=8000)
+                page.wait_for_selector("h1", timeout=3000)
+            except: pass
+
+            actual_name = ""
+            if page.locator("h1").count() > 0:
+                # ลองดึงข้อมูลหลายๆ แบบเผื่อเว็บโหลดช้า
+                actual_name = page.locator("h1").inner_text().strip()
+                if not actual_name: actual_name = page.evaluate("() => { let el = document.querySelector('h1'); return el ? el.innerText : ''; }").strip()
+
             print(f"      🏢 Verify: '{actual_name}'")
             
-            # ตรวจสอบขั้นสุดท้าย (65% เพื่อให้ คันทรี่ คอมเพล็กซ์ ผ่านได้)
-            if difflib.SequenceMatcher(None, project_name.lower(), actual_name.lower()).ratio() < 0.55 and project_name.lower() not in actual_name.lower():
-                 print(f"      ❌ Match Failed! ({actual_name})")
-                 browser.close()
-                 return None
+            # ตรวจสอบขั้นสุดท้าย (ถ้าดึง H1 ไม่ได้ ให้ข้ามไปเลยเพราะเราได้ URL ที่ถูกต้องจากหน้า Search แล้ว)
+            if actual_name:
+                ratio_en = difflib.SequenceMatcher(None, project_name.lower(), actual_name.lower()).ratio()
+                ratio_th = difflib.SequenceMatcher(None, thai_project_name.lower(), actual_name.lower()).ratio() if thai_project_name else 0
+                
+                if max(ratio_en, ratio_th) < 0.55 and project_name.lower() not in actual_name.lower() and best_text.lower() not in actual_name.lower():
+                     print(f"      ❌ Match Failed! ({actual_name})")
+                     browser.close()
+                     return None
 
             soup = BeautifulSoup(page.content(), 'html.parser')
             browser.close()

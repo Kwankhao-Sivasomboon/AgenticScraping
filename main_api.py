@@ -3,9 +3,11 @@ import re
 import time
 import json
 import logging
+import asyncio
 import requests
 from io import BytesIO
 from datetime import datetime, timedelta
+from contextlib import asynccontextmanager
 from PIL import Image
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field, ConfigDict
@@ -23,7 +25,33 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 load_dotenv()
 
-app = FastAPI(title="Property Color Analysis API", version="2.0")
+# ==========================================================
+# Task Queue System
+# ==========================================================
+analysis_queue = asyncio.Queue()
+processing_set = set()
+
+async def analysis_worker():
+    """Background worker that continuously processes the queue sequentially."""
+    while True:
+        property_id = await analysis_queue.get()
+        try:
+            # Run the synchronous scraper function in a separate thread so it doesn't block FastAPI
+            await asyncio.to_thread(process_property_analysis, property_id)
+        except Exception as e:
+            logger.error(f"Worker Error for property_id {property_id}: {e}")
+        finally:
+            analysis_queue.task_done()
+            if property_id in processing_set:
+                processing_set.remove(property_id)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = asyncio.create_task(analysis_worker())
+    yield
+    task.cancel()
+
+app = FastAPI(title="Property Color Analysis API", version="2.0", lifespan=lifespan)
 
 # ==========================================================
 # ⚙️ Config
@@ -55,8 +83,8 @@ class PropertyAnalysisResponse(BaseModel):
 # ==========================================================
 # Helpers
 # ==========================================================
-def download_image_as_part(url: str, custom_headers: dict = None):
-    """Download and compress image as Gemini Part (เนียนเป็น Browser เพื่อเลี่ยง 403)"""
+def download_image_as_part(url: str, custom_headers: dict = None, agent_token: str = None):
+    """Download and compress image as Gemini Part. ใส่ Bearer token ด้วยเพราะ app.yourhome.co.th media URLs ต้องใช้ auth"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
@@ -72,6 +100,11 @@ def download_image_as_part(url: str, custom_headers: dict = None):
     }
     if custom_headers:
         headers.update(custom_headers)
+    
+    # 🔑 สำคัญ: media URLs ของ app.yourhome.co.th ต้องใช้ Bearer Token ถึงจะโหลดได้
+    # (เปิดใน Browser ได้เพราะมี Cookie Session แต่ requests ต้องส่ง Authorization)
+    if agent_token:
+        headers["Authorization"] = f"Bearer {agent_token}"
         
     try:
         # ลองดาวน์โหลดรูปภาพ
@@ -208,7 +241,7 @@ def process_property_analysis(property_id: int):
         # สำคัญ: ต้องใช้ Signed URL จาก map ที่เราเพิ่ง Refresh มา (ถ้ามี)
         img_url = url_map.get(img_id_str) or img_meta.get("url")
         
-        part = download_image_as_part(img_url, custom_headers=download_headers)
+        part = download_image_as_part(img_url, custom_headers=download_headers, agent_token=api.token)
         if part:
             image_parts.append(part)
             original_image_ids.append(img_id_str)
@@ -411,14 +444,23 @@ def process_property_analysis(property_id: int):
 # Endpoint
 # ==========================================================
 @app.post("/api/analyze-property")
-async def trigger_property_analysis(req: AnalyzeRequest, background_tasks: BackgroundTasks):
+async def trigger_property_analysis(req: AnalyzeRequest):
     if not req.property_id:
         raise HTTPException(status_code=400, detail="property_id is required")
 
-    background_tasks.add_task(process_property_analysis, req.property_id)
+    if req.property_id in processing_set:
+        return {
+            "success": True,
+            "message": f"Property ID {req.property_id} is already in the queue or currently processing. Skipped.",
+            "status": "already_queued"
+        }
+
+    processing_set.add(req.property_id)
+    analysis_queue.put_nowait(req.property_id)
 
     return {
         "success": True,
         "message": f"Property ID {req.property_id} has been queued for AI Analysis.",
-        "status": "processing_in_background"
+        "status": "processing_in_background",
+        "queue_position": analysis_queue.qsize()
     }

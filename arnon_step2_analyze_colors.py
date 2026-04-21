@@ -35,8 +35,11 @@ class PropertyAnalysis(BaseModel):
     element_color: List[int] = Field(description="Aggregated 14-color percentage for Furniture in the same order.")
     element_furniture: List[str] = Field(description="List of 14 strings. Each string 'i' contains unique comma-separated furniture names in that color 'i'. If empty, use \"\". Max 10 items per color.")
 
-def download_image_as_part(url: str):
+def download_image_as_part(url: str, agent_token: str = None):
     headers = {"User-Agent": "Mozilla/5.0"}
+    # 🔑 app.yourhome.co.th media URLs ต้องใช้ Bearer Token ถึงจะส่งรูปมาให้ (เหมือน Browser ที่มี Session Cookie)
+    if agent_token:
+        headers["Authorization"] = f"Bearer {agent_token}"
     try:
         r = requests.get(url, headers=headers, timeout=15)
         if r.status_code == 200:
@@ -127,7 +130,7 @@ def analyze_arnon_properties():
         original_image_ids = []
         for img_meta in gallery_images[:15]:
             img_url = url_map.get(str(img_meta.get("id"))) or img_meta.get("url")
-            part = download_image_as_part(img_url)
+            part = download_image_as_part(img_url, agent_token=api.token)
             if part:
                 image_parts.append(part)
                 original_image_ids.append(str(img_meta.get("id")))
