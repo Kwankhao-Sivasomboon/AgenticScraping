@@ -58,24 +58,65 @@ class APIService:
                 res_json = response.json()
                 
                 # --- ดึง Token จาก data -> token ตามตัวอย่าง Log ---
-                data_part = res_json.get('data', {})
-                self.token = data_part.get('token')
+                token_data = res_json.get("data", {})
+                new_token = token_data.get("token") or res_json.get("token")
                 
-                if self.token:
-                    print("✅ Agent Authentication Successful.")
+                if new_token:
+                    self.token = new_token
+                    print(f"✅ Agent Authentication Successful for '{self.email}'.")
                     return True
                 else:
-                    print("❌ Authentication Failed: Token not found in response data.")
+                    print(f"❌ Authentication Error: Token not found in response. {res_json}")
                     return False
             except Exception as e:
-                print(f"❌ Authentication Failed: {e}")
-                if hasattr(e, 'response') and e.response is not None:
-                    print(f"Response: {e.response.text}")
-                if attempt < max_login_retries:
-                    print(f"🔄 Retrying authentication in 5s...")
-                    time.sleep(5)
-                else:
+                if attempt == max_login_retries:
+                    err_msg = f"❌ Agent Auth Failed ({response.status_code if 'response' in locals() else 'Unknown'}): {response.text if 'response' in locals() else str(e)}"
+                    print(err_msg)
                     return False
+                time.sleep(2)
+        return False
+
+    def authenticate_staff(self):
+        """
+        Login as STAFF member and get the token (Required for Project Creation).
+        """
+        if not self.staff_email or not self.staff_password:
+            print("❌ No STAFF_API_EMAIL/PASSWORD found in .env")
+            return False
+        
+        print(f"🔐 Authenticating STAFF API ({self.staff_email})...")
+        url = f"{self.base_url}/api/staff/login"
+        payload = {
+            "email": self.staff_email,
+            "password": self.staff_password
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=15)
+            if response.status_code in [200, 201]:
+                res_json = response.json()
+                token_data = res_json.get("data", {})
+                new_token = token_data.get("token") or res_json.get("token")
+                
+                if new_token:
+                    self.token = new_token
+                    self.staff_token = new_token
+                    print(f"✅ Staff Authentication Successful for '{self.staff_email}'.")
+                    return True
+                else:
+                    print(f"❌ Staff Auth Error: Token not found. {res_json}")
+                    return False
+            else:
+                print(f"❌ Staff Auth Failed ({response.status_code}): {response.text}")
+                return False
+        except Exception as e:
+            print(f"❌ Staff Auth Exception: {e}")
+            return False
+
     def authenticate(self):
         """
         [AGENT] Login to Agent API to get access token.

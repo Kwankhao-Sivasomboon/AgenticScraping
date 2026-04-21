@@ -27,15 +27,23 @@ def upload_arnon_analysis():
         return
 
     print(f"🚀 สแกนหาคิวงานอัปโหลดจาก '{SOURCE_COLLECTION}' (analyzed=True, uploaded=False)...")
-    
+    def pad_list(lst, size, default=0):
+        """เติมค่า default ให้ลิสต์มีความยาวเท่ากับ size"""
+        if not lst: return [default] * size
+        return (lst + [default] * size)[:size]
+
     docs = fs.db.collection(SOURCE_COLLECTION).where(filter=FieldFilter("analyzed", "==", True)).where(filter=FieldFilter("uploaded", "==", False)).get()
 
     for doc in docs:
         prop_id = doc.id
         data = doc.to_dict()
         
+        # Ensure color lists have exactly 14 elements
+        room_colors = pad_list(data.get("room_color"), 14, 0)
+        furniture_colors = pad_list(data.get("element_color"), 14, 0)
+        
         # 1. Expand element_furniture from flattened string to List[List[str]]
-        raw_furniture = data.get("element_furniture", [])
+        raw_furniture = pad_list(data.get("element_furniture"), 14, "")
         formatted_furniture = []
         for s in raw_furniture:
             if isinstance(s, str) and s.strip():
@@ -46,9 +54,6 @@ def upload_arnon_analysis():
         
         # 2. Determine dominant color Thai name using 70/30 weighting
         # (Room Color 70% / Furniture Color 30%)
-        room_colors = data.get("room_color", [0]*14)
-        furniture_colors = data.get("element_color", [0]*14)
-        
         weighted_colors = []
         for i in range(14):
             # สูตร: (โครงสร้าง * 0.7) + (เฟอร์นิเจอร์ * 0.3)
@@ -59,7 +64,7 @@ def upload_arnon_analysis():
         dominant_color_thai = THAI_COLORS[max_idx]
 
         # 3. Handle structural elements (walls, floors, etc.)
-        raw_room = data.get("element_room", [])
+        raw_room = pad_list(data.get("element_room"), 14, "")
         formatted_room = []
         for s in raw_room:
             if isinstance(s, str) and s.strip():
@@ -77,17 +82,21 @@ def upload_arnon_analysis():
         now_thailand = datetime.utcnow() + timedelta(hours=7)
         now_iso = now_thailand.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
 
+        # จำกัดจำนวนไอเทมในลิสต์ ไม่ให้ยาวเกินที่ DB จะรับไหว (Max 5 items per color)
+        safe_furniture = [items[:5] for items in formatted_furniture]
+        safe_room = [items[:5] for items in formatted_room]
+
         payload = {
             "property_id": int(prop_id),
             "analyzed_at": now_iso, # 🕒 เพิ่มเวลาที่วิเคราะห์จริง
             "average_color_hex": "#FFFFFF", 
             "color": dominant_color_thai,
-            "room_color": data.get("room_color"),
+            "room_color": room_colors,
             "furniture_color": furniture_colors,
-            "furniture_elements": formatted_furniture,
+            "furniture_elements": safe_furniture,
             "house_color": house_color,
             "house_color2": house_color2,
-            "room_elements": formatted_room,
+            "room_elements": safe_room,
             "interior_style": data.get("architect_style", "Other"),
             "property_type": "house"
         }

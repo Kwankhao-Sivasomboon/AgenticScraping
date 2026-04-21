@@ -47,8 +47,17 @@ def scrape_zmyhome_data(project_name, property_type=""):
             Stealth().apply_stealth_sync(context)
             page = context.new_page()
 
-            # 1. เข้าหน้าเว็บ
-            page.goto("https://zmyhome.com/project", wait_until="domcontentloaded", timeout=30000)
+            # 1. เข้าหน้าเว็บ (เลือกตามประเภทโครงการ)
+            base_url = "https://zmyhome.com/project"
+            if "condo" in property_type:
+                target_start_url = f"{base_url}/condo"
+            elif "house" in property_type or "townhome" in property_type:
+                target_start_url = f"{base_url}/house"
+            else:
+                target_start_url = base_url
+                
+            print(f"      🚀 Navigating to: {target_start_url}")
+            page.goto(target_start_url, wait_until="domcontentloaded", timeout=30000)
             
             # จัดการ Cookie (อิงจาก Codegen ของแท้)
             try: page.get_by_role("button", name="ยอมรับทั้งหมด").click(timeout=3000)
@@ -263,6 +272,27 @@ def scrape_zmyhome_data(project_name, property_type=""):
         print(f"      [!] Error: {e}")
         return None
 
+def detect_major_type(data):
+    """วิเคราะห์ว่าเป็นคอนโดหรือบ้านจากหลายๆ source"""
+    # 1. เช็คจากฟิลด์มาตรฐาน
+    p_type = str(data.get("property_type", "")).lower()
+    sheet_type = str(data.get("sheet_ประเภททรัพย์", "")).lower()
+    p_name = str(data.get("project_name", "")).lower()
+    
+    combined = f"{p_type} {sheet_type} {p_name}"
+    
+    # 🏢 ตรวจจับคอนโด (เน้นคำสำคัญ)
+    # ครอบคลุม: คอนโด, คอนโดมือ2, Condominium, Apartment
+    if any(k in combined for k in ["คอนโด", "condo", "apartment", "เอพาร์ทเม้นท์"]):
+        return "condo"
+    
+    # 🏠 ตรวจจับบ้าน (เน้นคำสำคัญ)
+    # ครอบคลุม: บ้าน, บ้านมือ2, ทาวน์เฮ้าส์, ทาวน์โฮม, บุราสิริ, House, Village
+    if any(k in combined for k in ["บ้าน", "house", "townhome", "ทาวน์โฮม", "ทาวน์เฮ้าส์", "villa", "วิลล่า", "บุราสิริ", "เศรษฐสิริ", "shophouse", "village"]):
+        return "house"
+        
+    return "unknown"
+
 def main():
     print(f"🔐 Firestore: Initializing...")
     fs = FirestoreService()
@@ -270,9 +300,17 @@ def main():
     projects_map = {}
     skipped = 0
 
+    check_fields = [
+        "zmyh_built_year", "zmyh_common_fee", "zmyh_developer", 
+        "zmyh_facilities", "zmyh_launch_price", "zmyh_max_floors", 
+        "zmyh_num_buildings", "zmyh_parking", "zmyh_project_area", 
+        "zmyh_total_units", "zmyh_scraped"
+    ]
+
     for doc in docs:
         data = doc.to_dict()
-        if data.get("zmyh_built_year"):
+        # ถ้ามีข้อมูลตัวใดตัวหนึ่งจาก ZmyHome โผล่มาแล้ว ให้ข้ามทันที
+        if any(data.get(f) for f in check_fields):
             skipped += 1
             continue
             
@@ -288,14 +326,23 @@ def main():
     p_count = 0
     for p_name, p_docs in projects_map.items():
         if TEST_LIMIT and p_count >= TEST_LIMIT: break
-        print(f"🏢 Project: {p_name} ({len(p_docs)} leads)")
         
-        scraped = scrape_zmyhome_data(p_name)
+        # 🧠 วิเคราะห์ประเภทบ้าน/คอนโด แบบละเอียด (ใช้ข้อมูลจาก Lead แรก)
+        p_type = detect_major_type(p_docs[0].to_dict())
+        
+        print(f"🏢 Project: {p_name} ({len(p_docs)} leads) | Category: {p_type.upper()}")
+        
+        scraped = scrape_zmyhome_data(p_name, property_type=p_type)
+        payload = {"zmyh_scraped": True} # ตีตราว่าทำแล้วชัวร์ๆ
+        
         if scraped:
-            payload = {f"zmyh_{k}": v for k, v in scraped.items()}
-            print(f"   ✅ Found Specs: {list(payload.keys())}")
-            for doc in p_docs: doc.reference.update(payload)
-        else: print(f"   ❌ No data.")
+            for k, v in scraped.items(): payload[f"zmyh_{k}"] = v
+            print(f"   ✅ Found Specs: {list(scraped.keys())}")
+        else: 
+            print(f"   ❌ No data found for this project.")
+            
+        # Update ทั้งหมดในกลุ่ม
+        for doc in p_docs: doc.reference.update(payload)
         
         p_count += 1
         time.sleep(1)
