@@ -5,6 +5,7 @@ import requests
 import re
 import urllib.request
 import urllib.parse
+import datetime as dt_module
 from dotenv import load_dotenv
 
 # Use Gemini for translation if needed
@@ -219,12 +220,226 @@ def main():
         developer_groups[dev_name][prj_name].append({"doc_id": doc_id, **data})
         
     if TEST_MODE:
-        print("\n--- 🧪 TEST MODE Report ---")
+        print("\n--- 🧪 TEST MODE: Generating HTML Facilities Report ---")
         total_projects = 0
+        all_unique_facilities = set()
+        report_data = [] # List of {dev: name, projects: [{name: n, facs: []}], unique_facs: []}
+
         for dev_name, projects in developer_groups.items():
-            print(f"🏢 {dev_name} ({len(projects)} projects)")
+            dev_facilities = set()
+            dev_projects_list = []
+            
+            def clean_fac(f):
+                if not f: return ""
+                f = f.strip().lower()
+                f = re.sub(r"\(.*?\)", "", f).strip()
+                
+                # 🧠 [Mega Semantic Mapping] กวาดล้างครั้งใหญ่
+                # ลำดับมีความสำคัญ: เอาคำเฉพาะขึ้นก่อนคำกว้าง
+                mapping = {
+                    # --- Thai Standard ---
+                    "ห้องออกกำลังกาย": "fitness", "สระว่ายน้ำ": "swimming pool", "สระว่ายนํ้า": "swimming pool",
+                    "ลิฟท์": "elevator", "ลิฟต์": "elevator", "สวนหย่อม": "garden", "สวนส่วนกลาง": "garden",
+                    "ที่จอดรถ": "parking", "ลานจอดรถ": "parking", "กล้องวงจรปิด": "cctv",
+                    "ระบบความปลอดภัย": "security 24hr", "รปภ": "security 24hr", "รักษาความปลอดภัย": "security 24hr",
+                    "โถงต้อนรับ": "lobby", "ห้องสมุด": "library", "ห้องอเนกประสงค์": "multipurpose room",
+                    "อเนกประสงค์": "multipurpose room", "เอนกประสงค์": "multipurpose room",
+                    "สนามเด็กเล่น": "playground", "คีย์การ์ด": "keycard access", "ประตูทางเข้า-ออกโครงการ": "gate access",
+                    
+                    # --- Search & Grouping Rules ---
+                    "bbq": "bbq area", "บาร์บีคิว": "bbq area",
+                    "shuttle": "shuttle service", "รับ-ส่ง": "shuttle service", "รับส่ง": "shuttle service",
+                    "fitness": "fitness", "gym": "fitness", "ยิม": "fitness", "exercise": "fitness", "spinning": "fitness", "cardio": "fitness",
+                    "pool": "swimming pool", "swimming": "swimming pool", "jacuzzi": "jacuzzi", "จากุซซี่": "jacuzzi",
+                    "sauna": "sauna", "ซาวน่า": "sauna", "steam": "steam room", "สตรีม": "steam room", "onsen": "onsen",
+                    "garden": "garden", "park": "garden", "green": "garden", "พื้นที่สีเขียว": "garden", "pavilion": "pavilion", "ศาลา": "pavilion",
+                    "co-working": "co-working space", "working": "co-working space", "co-living": "co-living space",
+                    "meeting": "meeting room", "ประชุม": "meeting room", "lounge": "lounge", "เลานจ์": "lounge",
+                    "theater": "mini theater", "theatre": "mini theater", "cinema": "mini theater", "หนัง": "mini theater", "โรงภาพยนตร์": "mini theater",
+                    "playground": "playground", "kid": "playground", "เด็ก": "playground", "playroom": "playground",
+                    "keycard": "keycard access", "key card": "keycard access", "access card": "keycard access", "door lock": "keycard access", "doorlock": "keycard access", "สแกน": "biometric access",
+                    "security": "security 24hr", "cctv": "cctv", "กล้องวงจร": "cctv",
+                    "parking": "parking", "automatic parking": "auto parking",
+                    "lobby": "lobby", "waiting": "lobby", "reception": "lobby",
+                    "jogging": "jogging track", "walking track": "jogging track", "วิ่ง": "jogging track",
+                    "library": "library", "study": "library", "reading": "library",
+                    "ev charger": "ev charger", "ชาร์จรถ": "ev charger",
+                    "sky": "sky facilities", "roof": "sky facilities", "ดาดฟ้า": "sky facilities", "horizon": "sky facilities",
+                    "golf": "golf simulator", "กอล์ฟ": "golf simulator",
+                    "game": "game room", "gaming": "game room", "เกม": "game room",
+                    "yoga": "yoga room", "โยคะ": "yoga room",
+                    "spa": "spa room", "massage": "spa room", "นวด": "spa room", "salon": "salon",
+                    "mail": "mail room", "จดหมาย": "mail room",
+                    "laundry": "laundry room", "ซัก": "laundry room", "washer": "laundry room",
+                    
+                    # --- Luxury / Specific Names (Grouping to Standard) ---
+                    "atrium": "lobby", "clover": "garden", "forest": "garden", "botany": "garden",
+                    "social club": "clubhouse", "residential club": "clubhouse", "lifestyle club": "clubhouse",
+                    "cabin": "pavilion", "retreat": "pavilion", "pavilion": "pavilion",
+                    "observatorium": "sky facilities", "observatory": "sky facilities",
+                    "celebrity": "lounge", "executive": "lounge", "passion": "lounge",
+                    "mini bar": "lounge", "wine bar": "lounge", "wine cellar": "lounge",
+                    "station": "co-working space", "creative studio": "co-working space", "live studio": "co-working space",
+                    "retail": "shops", "shop": "shops", "minimart": "shops", "maxvalu": "shops", "convenience store": "shops", "starbucks": "shops",
+                    "cafe": "shops", "coffee": "shops", "restaurant": "shops", "อาหาร": "shops", "เสริมสวย": "shops",
+                    "shuttle": "shuttle service", "รับส่ง": "shuttle service", "รับ-ส่ง": "shuttle service", "car sharing": "shuttle service",
+                    "vending": "vending machine", "ตู้หยอดเหรียญ": "vending machine",
+                    "wifi": "wi-fi", "wi-fi": "wi-fi", "internet": "wi-fi", "อินเตอร์เน็ต": "wi-fi",
+                    "สวน": "garden", "garden": "garden", "park": "garden", "green": "garden", "trees": "garden", "หย่อม": "garden",
+                    "boxing": "boxing area", "ชกมวย": "boxing area", "มวย": "boxing area",
+                    "pet": "pet area", "สัตว์เลี้ยง": "pet area",
+                    "bicycle": "bicycle track", "จักรยาน": "bicycle track", "bike": "bicycle track",
+                    "katsan": "gate access", "easy pass": "gate access", "ทางเข้า": "gate access", "รั้ว": "gate access", "ประตู": "gate access",
+                    " multipurpose": "multipurpose room", "อเนกประสงค์": "multipurpose room", "เอนกประสงค์": "multipurpose room", "กิจกรรม": "multipurpose room", "เปี่ยมสุข": "multipurpose room", "housework": "multipurpose room",
+                    "laundry": "laundry room", "ซัก": "laundry room", "washer": "laundry room", "washing": "laundry room"
+                }
+                
+                # 🚫 Exclude List: สิ่งที่ไม่ใช่ Facilities จริงๆ
+                excludes = [
+                    "ริมแม่น้ำ", "ติดแม่น้ำ", "chaophraya", "ริมน้ำ", "แม่น้ำ", "เจ้าพระยา",
+                    "ถนนกว้าง", "รั้วสูง", "12 ม.", "9 ม.", "2.5 เมตร", "สายไฟฟ้าใต้ดิน",
+                    "1 ปี", "350 เมตร", "bts", "mrt", "ใกล้", "ติด", "ห่างจาก",
+                    "ระบบป้องกันอัคคีภัย", "smoke", "detector", "heat", "fire alarm",
+                    "ระบบสัญญาณกันขโมย", "magnetic", "motion sensor", "tv", "สายอากาศ", "เคเบิ้ล"
+                ]
+                
+                for ex in excludes:
+                    if ex in f: return ""
+
+                for key, val in mapping.items():
+                    if key in f: return val
+                
+                return f
+
+            for prj_name, leads_list in projects.items():
+                prj_facilities = set()
+                for lead in leads_list:
+                    facs = lead.get("zmyh_facilities")
+                    if isinstance(facs, list):
+                        for f in facs: 
+                            cleaned = clean_fac(f)
+                            if cleaned: prj_facilities.add(cleaned)
+                    elif isinstance(facs, str) and facs:
+                        for f in facs.split(","):
+                            cleaned = clean_fac(f)
+                            if cleaned: prj_facilities.add(cleaned)
+                
+                dev_projects_list.append({
+                    "name": prj_name,
+                    "lead_count": len(leads_list),
+                    "facilities": sorted(list(prj_facilities))
+                })
+                dev_facilities.update(prj_facilities)
+            
+            report_data.append({
+                "developer": dev_name,
+                "projects": dev_projects_list,
+                "unique_facilities": sorted(list(dev_facilities))
+            })
+            all_unique_facilities.update(dev_facilities)
             total_projects += len(projects)
-        print(f"\n📊 Total Developers: {len(developer_groups)}, Projects: {total_projects}")
+
+        # --- Generate HTML ---
+        css_style = """
+            :root {
+                --primary: #2563eb;
+                --dark: #1e293b;
+                --light: #f8fafc;
+                --accent: #f59e0b;
+            }
+            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: var(--light); color: var(--dark); margin: 0; padding: 20px; }
+            .container { max-width: 1200px; margin: auto; }
+            header { background: var(--dark); color: white; padding: 30px; border-radius: 15px; margin-bottom: 30px; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); }
+            h1 { margin: 0; font-size: 24px; }
+            .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-top: 20px; }
+            .stat-card { background: rgba(255,255,255,0.1); padding: 15px; border-radius: 10px; text-align: center; }
+            .stat-value { font-size: 28px; font-weight: bold; color: var(--accent); }
+            
+            .dev-section { background: white; border-radius: 15px; padding: 25px; margin-bottom: 30px; box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1); }
+            .dev-header { border-bottom: 2px solid #e2e8f0; padding-bottom: 15px; margin-bottom: 20px; display: flex; align-items: baseline; gap: 15px; }
+            .dev-title { color: var(--primary); font-size: 20px; font-weight: bold; }
+            
+            .project-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 20px; }
+            .project-card { border: 1px solid #e2e8f0; padding: 15px; border-radius: 8px; background: #fff; }
+            .project-name { font-weight: bold; margin-bottom: 10px; color: #475569; }
+            
+            .tag-container { display: flex; flex-wrap: wrap; gap: 5px; }
+            .tag { background: #eff6ff; color: #1e40af; padding: 4px 10px; border-radius: 20px; font-size: 11px; border: 1px solid #bfdbfe; }
+            .tag-all { background: #fef3c7; color: #92400e; border-color: #fde68a; font-weight: bold; }
+            
+            .footer { text-align: center; margin-top: 50px; color: #64748b; font-size: 14px; }
+        """
+        
+        global_tags = "".join([f'<span class="tag tag-all">{f}</span>' for f in sorted(list(all_unique_facilities))])
+        
+        dev_sections = []
+        for d in report_data:
+            project_cards = []
+            for p in d['projects']:
+                tags = "".join([f'<span class="tag">{tf}</span>' for tf in p['facilities']]) or '<span style="color:#cbd5e1; font-size:12px;">No facilities data</span>'
+                card = f"""
+                <div class="project-card">
+                    <div class="project-name">📌 {p['name']} <small style="color:#94a3b8; font-weight:normal">({p['lead_count']} leads)</small></div>
+                    <div class="tag-container">{tags}</div>
+                </div>
+                """
+                project_cards.append(card)
+            
+            section = f"""
+            <div class="dev-section">
+                <div class="dev-header">
+                    <span class="dev-title">{d['developer']}</span>
+                    <span style="color: #64748b; font-size: 0.9em;">({len(d['projects'])} Projects)</span>
+                </div>
+                <div class="project-grid">
+                    {" ".join(project_cards)}
+                </div>
+            </div>
+            """
+            dev_sections.append(section)
+
+        now_str = dt_module.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        html_content = f"""
+        <!DOCTYPE html>
+        <html lang="th">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Facilities Report - Step 5</title>
+            <style>{css_style}</style>
+        </head>
+        <body>
+            <div class="container">
+                <header>
+                    <h1>🏢 Property Facilities Dashboard</h1>
+                    <div class="stats-grid">
+                        <div class="stat-card"><div class="stat-value">{len(developer_groups)}</div><div>Developers</div></div>
+                        <div class="stat-card"><div class="stat-value">{total_projects}</div><div>Projects</div></div>
+                        <div class="stat-card"><div class="stat-value">{len(all_unique_facilities)}</div><div>Unique Facilities</div></div>
+                    </div>
+                </header>
+
+                <div class="dev-section">
+                    <h2 style="color: var(--dark)">🌐 Global Facilities Summary</h2>
+                    <div class="tag-container">{global_tags}</div>
+                </div>
+
+                {" ".join(dev_sections)}
+
+                <div class="footer">
+                    Generated at {now_str} | PainpointToday Agentic Scraping
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        report_path = "step5_facilities_report.html"
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write(html_content)
+        
+        print(f"\n✅ HTML Report Generated at: {os.path.abspath(report_path)}")
+        print(f"👉 เปิดไฟล์เพื่อดูสรุปสสวยๆ ได้เลยครับ!")
         return
 
     # --- โหลดชื่อโครงการที่สร้างแล้วจาก project_condo และ project_house ---

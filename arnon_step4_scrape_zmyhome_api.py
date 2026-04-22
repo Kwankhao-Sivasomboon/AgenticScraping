@@ -1,324 +1,182 @@
 import os
 import re
 import time
-import random
+import sys
+import json
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+from playwright.sync_api import sync_playwright
 
-# Primary: DuckDuckGo 
+# 🚀 SerpApi Library
 try:
-    from duckduckgo_search import DDGS
-    USE_DDG = True
+    from serpapi import GoogleSearch
 except ImportError:
-    USE_DDG = False
+    print("❌ กรุณารัน: pip install google-search-results")
+    sys.exit(1)
 
-# Fallback: Google Search API
-try:
-    from googlesearch import search as google_search
-    USE_GOOGLE = True
-except ImportError:
-    USE_GOOGLE = False
-
-import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from src.services.firestore_service import FirestoreService
 
 load_dotenv()
 
-# ⚙️ ตั้งค่าโหมดทดสอบ: ใส่จำนวนรายการที่ต้องการ หรือ None เพื่อรันทั้งหมด
-TEST_LIMIT = None  # แก้เป็น None เพื่อรันทั้งหมด
+# ⚙️ Config
+TEST_LIMIT = 231 
+COLLECTION = "Leads"
+SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 
-def scrape_zmyhome_data(project_name, property_type=""):
-    """
-    ใช้ Playwright เข้าเว็บไซต์ zmyhome.com/project โดยตรง 
-    พิมพ์ค้นหา และกดเลือกผลลัพธ์
-    """
-    print(f"      🔎 Searching ON ZmyHome directly: '{project_name}' (Type: {property_type})")
+def find_zmyhome_url_serp(project_name: str) -> str | None:
+    if not SERPAPI_KEY:
+        print("      ⚠️ ERROR: SERPAPI_KEY หายไปจาก .env")
+        return None
+
+    query = f"site:zmyhome.com/project {project_name}"
+    zmyhome_pattern = re.compile(r"https?://(?:www\.)?zmyhome\.com/project/[^/\s?]+", re.IGNORECASE)
+    exclude_keywords = ["marker", "search", "filter", "sort", "per-page"]
+
+    print(f"      🐍 SerpApi Search: '{project_name}'")
+    params = {"q": query, "api_key": SERPAPI_KEY, "engine": "google", "num": 5}
     
     try:
-        from playwright.sync_api import sync_playwright
-        from playwright_stealth import Stealth
-    except ImportError as e:
-        print(f"      [!] Playwright/stealth Error: {e}")
-        return None
+        search = GoogleSearch(params)
+        results = search.get_dict()
+        organic_results = results.get("organic_results", [])
+        for r in organic_results:
+            link = r.get("link", "")
+            if zmyhome_pattern.match(link):
+                if not any(k in link.lower() for k in exclude_keywords):
+                    print(f"      ✅ Found URL: {link}")
+                    return link
+    except Exception as e:
+        print(f"      ❌ Search Error: {e}")
+    return None
 
-    res = {}
+def scrape_zmyhome_project_page(project_url: str) -> dict:
+    print(f"      🎭 Playwright: Extracting {project_url}...")
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=False, args=["--no-sandbox", "--disable-blink-features=AutomationControlled"])
-            context = browser.new_context(viewport={"width": 1280, "height": 800})
-            Stealth().apply_stealth_sync(context)
-            page = context.new_page()
-
-            # 1. เข้าสู่หน้าแรก ZmyHome เพื่อให้ได้ Session / Cookies / Cloudflare validation
-            print(f"      🤖 [ZmyHome] Initiating Session...")
-            page.goto("https://zmyhome.com/project", wait_until="networkidle", timeout=30000)
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(project_url, wait_until="domcontentloaded", timeout=30000)
             
-            # --- จัดการ Cookie / Pop-up ---
-            try:
-                cookie_button = page.locator("button:has-text('ยอมรับ'), button:has-text('Accept'), .btn-cookie")
-                if cookie_button.is_visible():
-                    cookie_button.click(timeout=3000)
-            except:
-                pass
-
-            # 2. ฟังก์ชันเรียก API ค้นหาของ ZmyHome โดยตรงผ่านเบราว์เซอร์
-            def search_api(term):
-                # ใช้ JS Fetch ยิงตรงไปที่ระบบค้นหา (เหมือนคนพิมพ์ในช่องเป๊ะๆ แต่เร็วกว่า)
-                try:
-                    js_code = f"""async () => {{
-                        let res = await fetch('/search/load-point?term=' + encodeURIComponent("{term}"), {{
-                            headers: {{ 'X-Requested-With': 'XMLHttpRequest' }}
-                        }});
-                        let text = await res.text();
-                        try {{ return JSON.parse(text); }} 
-                        catch(e) {{ return null; }}
-                    }}"""
-                    return page.evaluate(js_code)
-                except Exception as e:
-                    print(f"      [!] API Fetch Error: {e}")
-                    return []
-
-            target_url = None
+            # รอให้คอนเทนเนอร์หลักขึ้น
+            try: page.wait_for_selector("ul.info-project__list", timeout=10000)
+            except: pass
             
-            # --- 3. ฟังก์ชันลองค้นหาแบบหลาย Step (Full Name -> Short Name) ---
-            def retry_search(name):
-                print(f"      📡 Querying internal API for: '{name}'")
-                results = search_api(name)
-                url = extract_url(results, name)
-                if url: return url
-                
-                # ถ้าไม่เจอ ลองตัดเหลือแค่ 2 คำแรก (Smart Truncation)
-                words = name.split()
-                if len(words) > 2:
-                    short_name = " ".join(words[:2])
-                    print(f"      📡 Retrying with shorter name: '{short_name}'")
-                    results = search_api(short_name)
-                    return extract_url(results, short_name)
-                return None
-
-            def extract_url(results, search_term):
-                if not results or not isinstance(results, list): return None
-                # 1. หาแบบเป๊ะๆ ใน label
-                for item in results:
-                    label = str(item.get("label", ""))
-                    if search_term.lower() in label.lower() and ('/project/' in str(item.get("slug", "")) or '/project/' in str(item.get("url", ""))):
-                        return item.get("url") or item.get("slug")
-                
-                # 2. ถ้าไม่เจอ ให้เอาอันแรกสุดที่เป็นหมวด "โครงการ" (มักจะตรงที่สุด)
-                for item in results:
-                    slug = str(item.get("slug", ""))
-                    url = str(item.get("url", ""))
-                    if '/project/' in slug or '/project/' in url:
-                        return url if url else slug
-                return None
-
-            # เริ่มลุย!
-            target_url = retry_search(project_name)
-
-            # --- FALLBACK: แปลเป็นไทยแล้วลุยต่อ ---
-            if not target_url and any(c.isalpha() for c in project_name):
-                print(f"      🔄 [Fallback] English API search failed. Translating...")
-                try:
-                    from google import genai
-                    api_key = os.getenv('GEMINI_API_KEY')
-                    if api_key:
-                        client = genai.Client(api_key=api_key)
-                        prompt = f"Name of property/condo: '{project_name}'. Give ONLY the main Thai brand name as used on ZmyHome. No phase, no locations. Example: 'The Metropolis Samrong' -> 'เดอะ เมโทรโพลิส'"
-                        response = client.models.generate_content(model='gemini-2.0-flash', contents=prompt)
-                        thai_name = response.text.strip()
-                        print(f"      🌐 Translated to: '{thai_name}'")
-                        target_url = retry_search(thai_name)
-                except Exception as ex:
-                    print(f"      [!] Translation fallback failed: {ex}")
-
-            # --- 4. ULTIMATE FALLBACK: ถ้าใช้ API ทุกวิถีทางแล้วยังไม่เจอ ให้ลองพิมพ์ค้นหาจริงผ่าน UI ---
-            if not target_url:
-                print(f"      ⌨️ [Ultimate Fallback] Trying real UI Search for: '{project_name}'")
-                try:
-                    # พิมพ์ใหม่ผ่าน UI
-                    page.fill("input#keyword", "")
-                    page.fill("input#keyword", project_name)
-                    page.press("input#keyword", "Enter")
-                    page.wait_for_load_state("networkidle")
-                    page.wait_for_timeout(3000)
-                    
-                    # เลื่อนหน้าเล็กน้อยเผื่อปุ่มแอบ
-                    page.mouse.wheel(0, 500)
-                    page.wait_for_timeout(1000)
-
-                    # หาล่าสุดในผลลัพธ์หน้าจอ (หาแบบ Fuzzy มากขึ้น)
-                    links = page.locator("span.label a, .auto-result a").all()
-                    for link in links:
-                        text = link.inner_text().strip()
-                        # ถ้าชื่อมีคำหลัก 2 คำแรกตรงกัน ให้ถือว่าใช่!
-                        main_keywords = [w.lower() for w in project_name.split() if len(w) > 2][:2]
-                        if all(k in text.lower() for k in main_keywords):
-                            target_url = link.get_attribute("href")
-                            if target_url: 
-                                print(f"      🎯 Found via UI Fuzzy Search: {target_url} (Matched: {text})")
-                                break
-                    
-                    # ถ้ายังไม่เจออีก... ลองใช้ "ชื่อสั้น" ที่ Gemini ช่วยคิดให้
-                    if not target_url:
-                        print(f"      🤖 Asking Gemini for the 'Shortest Common Name' on ZmyHome...")
-                        try:
-                            from google import genai
-                            client = genai.Client(api_key=os.getenv('GEMINI_API_KEY'))
-                            prompt = f"What is the shortest brand name for this condo in Thai that I should search on ZmyHome? Project: '{project_name}'. Give ONLY the Thai name. Example: 'The Coast Bangkok' -> 'เดอะ โคสท์'"
-                            resp = client.models.generate_content(model='gemini-2.0-flash', contents=prompt)
-                            short_thai = resp.text.strip()
-                            print(f"      ⌨️ Final Attempt with Short Thai: '{short_thai}'")
-                            page.fill("input#keyword", "")
-                            page.fill("input#keyword", short_thai)
-                            page.press("input#keyword", "Enter")
-                            page.wait_for_timeout(4000)
-                            
-                            # คว้าอันแรกสุดที่เจอเลย (มักจะเป็นหน้า Project หลัก)
-                            first_link = page.locator("span.label a, .auto-result a").first
-                            if first_link.is_visible():
-                                target_url = first_link.get_attribute("href")
-                                print(f"      🎯 Found via Short Thai Search: {target_url}")
-                        except: pass
-                except Exception as ui_ex:
-                    print(f"      [!] UI Fallback error: {ui_ex}")
-
-            if not target_url:
-                print(f"      ⚠️ ไม่พบโครงการ '{project_name}' หลังจากพยายามทุกวิธีแล้ว")
-                browser.close()
-                return None
-
-            if not target_url.startswith("http"):
-                target_url = "https://zmyhome.com" + target_url
-
-            print(f"      ✅ MATCH Project URL: {target_url}")
-
-            # 6. เข้าไปหน้าโครงการจริงเพื่อดึงข้อมูล
-            try:
-                # เปลี่บนเป็น domcontentloaded เผื่อเว็บ ZmyHome มี Ads หมุนไม่หยุดจนเจอ Timeout
-                page.goto(target_url, wait_until="domcontentloaded", timeout=15000)
-                page.wait_for_timeout(3000)
-            except Exception as e:
-                print(f"      ⚠️ Page loaded with warnings (proceeding to extract data): {e}")
-            
-            html_content = page.content()
+            content = page.content()
+            soup = BeautifulSoup(content, "html.parser")
             browser.close()
             
-            # -- ดึงข้อมูลผ่าน BeautifulSoup --
-            soup = BeautifulSoup(html_content, 'html.parser')
-            
+            res = {}
             container = soup.find('ul', class_='info-project__list')
-            items = container.find_all('li') if container else soup.find_all('li')
-            
-            for li in items:
+            li_items = container.find_all('li') if container else []
+
+            for li in li_items:
                 label_tag = li.find('span', class_='small')
                 value_tag = li.find('strong', class_=lambda c: c and 'label' in str(c))
+                
                 if label_tag and value_tag:
                     label = label_tag.get_text(strip=True)
-                    val = value_tag.get_text(strip=True)
-                    
+                    val   = value_tag.get_text(strip=True)
                     if "ปีที่สร้างเสร็จ" in label:
-                        match = re.search(r'(\d{4})', val)
-                        if match: res["built_year"] = int(match.group(1))
-                    elif "ราคาเปิดตัว" in label: res["launch_price"] = val
-                    elif "ค่าส่วนกลาง" in label: res["common_fee"] = val
+                        m = re.search(r'(\d{4})', val)
+                        res["built_year"] = m.group(1) if m else ""
+                    elif "ราคาเปิดตัว"  in label: res["launch_price"]   = val
+                    elif "ยูนิตทั้งหมด" in label: res["total_units"]    = val
+                    elif "พื้นที่จอดรถ" in label: res["parking"]        = val
+                    elif "จำนวนชั้น"    in label: res["max_floors"]     = val
+                    elif "ค่าส่วนกลาง"  in label: res["common_fee"]     = val
                     elif "พื้นที่โครงการ" in label: res["project_area"] = val
-                    elif "จำนวนตึก" in label: res["num_buildings"] = val
-                    elif "จำนวนชั้น" in label: res["max_floors"] = val
-                    elif "ยูนิตทั้งหมด" in label: res["total_units"] = val
-                    elif "พื้นที่จอดรถ" in label: res["parking"] = val
-                
-                # พิเศษ: หา "ผู้พัฒนา :" (บางทีไม่มี span.small)
-                text_content = li.get_text(strip=True)
-                if "ผู้พัฒนา :" in text_content:
-                    dev_name = text_content.replace("ผู้พัฒนา :", "").strip()
-                    res["developer"] = dev_name
-            
-            # Facilities
-            facilities = []
-            # ค้นหาด้วยคลาสที่พิมพ์ผิดของ ZmyHome ('facality')
-            fac_container = soup.find('div', class_='facality')
-            if fac_container:
-                # หา span ที่มี class 'label' ทั้งหมด ซึ่งจะครอบคลุมทั้งใน list ปกติ และที่ซ่อนอยู่ใน div.more
-                for span in fac_container.find_all('span', class_='label'):
-                    name = span.get_text(strip=True)
-                    if name: facilities.append(name)
-            if facilities: res["facilities"] = facilities
-            
-            return res if res else None
+                    elif "จำนวนตึก"     in label: res["num_buildings"]  = val
 
+                txt = li.get_text(strip=True)
+                if "ผู้พัฒนา :" in txt:
+                    dev_val = txt.replace("ผู้พัฒนา :", "").strip()
+                    if not re.search(r'\d{4}', dev_val): res["developer"] = dev_val
+
+            fac_div = soup.find('div', class_=re.compile(r'facality|facility', re.I))
+            if fac_div:
+                blacklist = ["บ้าน", "ขาย", "เช่า", "มือสอง", "เจ้าของขายเอง", "คอนโด", "โครงการ", "ทาวน์โฮม", "ที่ดิน"]
+                facs = [s.get_text(strip=True) for s in fac_div.find_all('span', class_='label') 
+                        if s.get_text(strip=True) and not any(b in s.get_text(strip=True) for b in blacklist)]
+                if facs: res["facilities"] = list(set(facs))
+
+            res["project_url"] = project_url
+            return res if res else {}
     except Exception as e:
-        print(f"      [!] Playwright Direct Scrape Error: {e}")
-        return None
+        print(f"      ❌ Playwright Error: {e}")
+        return {}
 
 def main():
-    print(f"🔐 Firestore: Initializing...")
     fs = FirestoreService()
-    docs = fs.db.collection("Leads").get()
-    # 1. จัดกลุ่มเอกสารทั้งหมดตามชื่อโครงการ และกรองอันที่มีข้อมูลแล้วทิ้ง
+    if not fs.db: return
+    
+    print(f"⏳ Fetching leads for processing...")
+    docs = list(fs.db.collection(COLLECTION).get())
+    
     projects_map = {}
-    skipped_count = 0
+    skipped = 0
+    
+    # ฟิลด์หลักที่เราต้องการเช็คว่ามีข้อมูลหรือยัง
+    core_fields = [
+        "zmyh_developer", "zmyh_built_year", "zmyh_total_units", 
+        "zmyh_facilities", "zmyh_launch_price", "zmyh_max_floors"
+    ]
 
     for doc in docs:
         data = doc.to_dict()
         
-        # ถ้ารายการไหนเคยดึงได้ปีและ facilities แล้ว ให้ข้ามไปเลย
-        if data.get("zmyh_built_year") and data.get("zmyh_facilities"):
-            skipped_count += 1
+        # 🕵️‍♂️ ลอจิก Skip ขั้นเทพ: นับจำนวนฟิลด์ที่มีข้อมูลจริง
+        filled_count = 0
+        for field in core_fields:
+            val = data.get(field)
+            if val and val != "" and val != []:
+                filled_count += 1
+        
+        # ถ้ามีข้อมูลเกินครึ่ง (4 จาก 6 ฟิลด์) ให้ถือว่า OK แล้ว
+        if filled_count >= 4:
+            skipped += 1
             continue
             
-        project_name = data.get("project_name") or data.get("sheet_ชื่อโครงการ") or (data.get("evaluation", {}).get("project_name") if isinstance(data.get("evaluation"), dict) else None)
+        p_name = data.get("project_name") or data.get("sheet_ชื่อโครงการ")
+        if not p_name: continue
         
-        if not project_name or str(project_name).strip().lower() in ["none", "null", ""]: 
-            continue
-            
-        project_name = str(project_name).strip()
-        property_type = data.get("sheet_ประเภททรัพย์", "")
+        if p_name not in projects_map: projects_map[p_name] = []
+        projects_map[p_name].append(doc)
 
-        if project_name not in projects_map:
-            projects_map[project_name] = {"property_type": property_type, "docs": []}
-        projects_map[project_name]["docs"].append(doc)
+    print(f"📊 Projects needing work: {len(projects_map)} (Skipped already sufficient: {skipped})")
 
-    print(f"📊 Total leads to process: {sum(len(v['docs']) for v in projects_map.values())} in {len(projects_map)} unique projects (Skipped {skipped_count} already scraped)")
-
-    # 2. วนลูป Scrape ทีละ "โครงการ" (ไม่ใช่ทีละ Lead)
-    updated_total = 0
-    processed_count = 0
-    
-    for project_name, info in projects_map.items():
-        if TEST_LIMIT and processed_count >= TEST_LIMIT: break
-
-        doc_count = len(info['docs'])
-        print(f"🏢 Project: {project_name} (Updating {doc_count} leads)")
+    count = 0
+    for p_name, p_docs in projects_map.items():
+        if TEST_LIMIT and count >= TEST_LIMIT: break
+        count += 1
         
-        # ปรับให้ส่ง property_type ที่คลีนแล้ว (เช่น 'คอนโด', 'แนวราบ') ไม่ใช่ 'คอนโดมือ 2'
-        p_type = info['property_type']
-        if "คอนโด" in p_type: p_type = "คอนโด"
-        elif any(x in p_type for x in ["บ้าน", "ทาวน์", "ราบ"]): p_type = "แนวราบ"
-        else: p_type = "" # ถ้าไม่แน่ใจ ไม่กรองจะดีกว่า
-
-        scraped = scrape_zmyhome_data(project_name, p_type)
+        # ดึง data จาก doc แรกในกลุ่มมาเช็ค URL
+        first_data = p_docs[0].to_dict()
+        existing_url = first_data.get("zmyh_project_url")
         
-        if scraped:
-            update_payload = {f"zmyh_{k}": v for k, v in scraped.items()}
-            print(f"   ✅ Found Specs: {list(update_payload.keys())}")
-            
-            # อัปเดตทันทีรายโครงการ! 
-            for doc in info['docs']:
-                try:
-                    doc.reference.update(update_payload)
-                except Exception as e:
-                    print(f"      [!] Update failed for {doc.id}: {e}")
-            updated_total += doc_count
-            print(f"   🔥 [Real-time Update] Saved {doc_count} leads to Firestore.")
+        print(f"\n🏢 [{count}] '{p_name}'")
+        
+        target_url = None
+        if existing_url and "/project/" in existing_url:
+            print(f"      ♻️ Using existing URL: {existing_url}")
+            target_url = existing_url
         else:
-            print(f"   ❌ No data found for project {project_name}.")
+            target_url = find_zmyhome_url_serp(p_name)
+            
+        if target_url:
+            scraped = scrape_zmyhome_project_page(target_url)
+            if scraped:
+                payload = {"zmyh_scraped": True}
+                for k, v in scraped.items(): payload[f"zmyh_{k}"] = v
+                for d in p_docs: d.reference.update(payload)
+                print(f"      ✅ Success")
+            else:
+                print(f"      ⚠️ Scrape empty")
+        else:
+            print(f"      ⏭️ URL Not Found")
         
-        processed_count += 1
-        time.sleep(2)
-
-    print(f"\n✅ Scraping finished. Total leads updated: {updated_total}")
+        time.sleep(1)
 
 if __name__ == "__main__":
     main()

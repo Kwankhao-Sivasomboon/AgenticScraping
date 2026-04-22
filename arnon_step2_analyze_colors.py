@@ -34,6 +34,8 @@ class PropertyAnalysis(BaseModel):
     element_room: List[str] = Field(description="List of 14 strings. Each string 'i' contains comma-separated English names of structural elements (e.g. wall, door, floor, ceiling, roof) in that exact color 'i'. If empty, use \"\". Max 10 items per color.")
     element_color: List[int] = Field(description="Aggregated 14-color percentage for Furniture in the same order.")
     element_furniture: List[str] = Field(description="List of 14 strings. Each string 'i' contains unique comma-separated furniture names in that color 'i'. If empty, use \"\". Max 10 items per color.")
+    lighting_conditions: str = Field(description="Detailed description of lighting in the photos (e.g., 'Warm white bulbs', 'Natural daylight through windows', 'Dim low-light').")
+    wall_reflections: str = Field(description="Detailed description of any light reflections on walls or floors (e.g., 'High gloss reflection on tiles', 'Soft window reflection on wall', 'Matte - no reflection').")
 
 def download_image_as_part(url: str, agent_token: str = None):
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -178,9 +180,10 @@ def analyze_arnon_properties():
             "11. STRICTLY EXCLUDE all electrical appliances (AC, washing machines, refrigerators, TVs, microwaves, etc.).\n"
             "12. COHERENCE RULE (CRITICAL): If 'element_furniture[i]' is NOT empty, 'element_color[i]' MUST be > 0. If 'element_color[i]' is 0, 'element_furniture[i]' MUST be \"\".\n"
             "13. NO REPETITION & LIMIT: List at most 10 unique items per color string. DO NOT repeat the same word. Use plural (e.g., 'chairs') instead of repeating same text.\n"
-            "14. LIGHTING COMPENSATION (CRITICAL): Photos often have warm yellow/orange lighting that can make White or Gray walls look Pink, Orange, or Purple. "
-            "You MUST identify the ACTUAL material/paint color as a human would see it in neutral daylight. "
-            "Favor neutral colors like Gray (11), White (10), or Light Brown (9) for typical modern interiors unless a vibrant color like Pink (6) is an explicit, intentional decorative choice."
+            "14. LIGHTING COMPENSATION: Photos often have warm yellow/orange lighting that can make White walls look Pink or Orange. Identify the ACTUAL material color as a human would see it in neutral daylight.\n"
+            "15. LIGHTING & REFLECTION REPORT (CRITICAL): Despite the compensation in step 14, you MUST describe the lighting and reflections you see. "
+            "For 'lighting_conditions', specify the source and tone (e.g., 'Yellow artificial lighting' or 'Bright natural light'). "
+            "For 'wall_reflections', identify any visible glare or reflection (e.g., 'Major window reflection on the far wall', 'Shiny floor reflection')."
         )
         
         # --- Gemini Analysis with Retry Logic ---
@@ -247,6 +250,10 @@ def analyze_arnon_properties():
                     update_payload["poor_condition_image_ids"] = poor_image_ids
 
                 fs.db.collection(TARGET_COLLECTION).document(prop_id).update(update_payload)
+                
+                # 🔦 [LOG ONLY] สรุปอารมณ์แสงให้บอสดูทางหน้าจอ
+                print(f"      🔦 [Lighting Mood]: {res.lighting_conditions} | Reflections: {res.wall_reflections}")
+                
                 print(f"✅ Property {prop_id} Sync Success!")
                 success = True
                 time.sleep(2)

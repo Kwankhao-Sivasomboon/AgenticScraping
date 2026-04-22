@@ -333,13 +333,15 @@ def main():
         print(f"🏢 Project: {p_name} ({len(p_docs)} leads) | Category: {p_type.upper()}")
         
         scraped = scrape_zmyhome_data(p_name, property_type=p_type)
-        payload = {"zmyh_scraped": True} # ตีตราว่าทำแล้วชัวร์ๆ
+        payload = {} 
         
         if scraped:
+            payload["zmyh_scraped"] = True
             for k, v in scraped.items(): payload[f"zmyh_{k}"] = v
             print(f"   ✅ Found Specs: {list(scraped.keys())}")
         else: 
-            print(f"   ❌ No data found for this project.")
+            # ถ้าหาไม่เจอ เราจะไม่ปักธง True เพื่อให้โอกาสตัวเองกลับมาขุดใหม่รอบหน้า
+            print(f"   ❌ No data found for this project. Keep zmyh_scraped=False for retry.")
             
         # Update ทั้งหมดในกลุ่ม
         for doc in p_docs: doc.reference.update(payload)

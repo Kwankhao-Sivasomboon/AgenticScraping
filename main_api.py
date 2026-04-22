@@ -79,6 +79,8 @@ class PropertyAnalysisResponse(BaseModel):
     element_room: List[str] = Field(description="List of 14 strings. Each string 'i' contains comma-separated English names of structural elements (wall, door, floor, ceiling) in that color 'i'. If empty, use ''. Max 10 items per color.")
     element_color: List[int] = Field(description="Aggregated 14-color percentage for Furniture in the same order.")
     element_furniture: List[str] = Field(description="List of 14 strings. Each string 'i' contains unique comma-separated furniture names in that color 'i'. If empty, use ''. Max 10 items per color.")
+    lighting_conditions: str = Field(description="Detailed description of lighting in the photos.")
+    wall_reflections: str = Field(description="Detailed description of light reflections on walls or floors.")
 
 # ==========================================================
 # Helpers
@@ -272,8 +274,11 @@ def process_property_analysis(property_id: int):
         "10. Both color arrays must be exactly 14 integers summing to exactly 100.\n"
         "11. STRICTLY EXCLUDE all electrical appliances (AC, washing machines, refrigerators, TVs, microwaves, etc.).\n"
         "12. COHERENCE RULE (CRITICAL): If 'element_furniture[i]' is NOT empty, 'element_color[i]' MUST be > 0. If 'element_color[i]' is 0, 'element_furniture[i]' MUST be ''.\n"
-        "13. NO REPETITION & LIMIT: List at most 10 unique items per color string.\n"
-        "14. LIGHTING COMPENSATION (CRITICAL): Favor neutral colors like Gray (11), White (10), or Light Brown (9) for typical modern interiors unless a vibrant color is an explicit decorative choice."
+        "13. NO REPETITION & LIMIT: List at most 10 unique items per color string. DO NOT repeat same word. Use plural (e.g., 'chairs').\n"
+        "14. LIGHTING COMPENSATION: Photos often have warm yellow/orange lighting. Identify the ACTUAL material color as a human would see it in neutral daylight.\n"
+        "15. LIGHTING & REFLECTION REPORT (CRITICAL): Despite compensation, you MUST describe the lighting and reflections. "
+        "For 'lighting_conditions', specify source and tone (e.g. 'Yellow artificial light'). "
+        "For 'wall_reflections', identify glare/reflection (e.g. 'Window reflection on wall')."
     )
 
     contents = [prompt] + image_parts
@@ -373,6 +378,9 @@ def process_property_analysis(property_id: int):
         }
         if poor_image_ids:
             firestore_payload["poor_condition_image_ids"] = poor_image_ids
+
+        # 🔦 [LOG ONLY] โยนคืน Log เพื่อดูอารมณ์ห้องโดยรวม (สีเดียว)
+        logger.info(f"🔦 Property {property_id} Mood: {res.lighting_conditions} | Reflections: {res.wall_reflections}")
 
         try:
             doc_ref = fs.db.collection(target_collection).document(str(property_id))
