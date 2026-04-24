@@ -9,131 +9,46 @@ load_dotenv()
 class APIService:
     def __init__(self, email=None, password=None):
         self.base_url = os.getenv('AGENT_API_BASE_URL', 'http://localhost/api')
-        # ลอจิกการดึง Credentials: ใช้ AGENT_API (General) ก่อน ถ้าไม่มีค่อยไป AGENT_ARNON (Specific)
-        self.email = email or os.getenv('AGENT_API_EMAIL') or os.getenv('AGENT_ARNON_EMAIL') or 'agent@example.com'
-        self.password = password or os.getenv('AGENT_API_PASSWORD') or os.getenv('AGENT_ARNON_PASSWORD') or 'password123'
-        self.token = os.getenv('AGENT_API_TOKEN')  # Can provide token directly to bypass login
         
-        # Staff Credentials (Using explicit STAFF_ variables for total clarity)
+        # เก็บกุญแจทั้ง 2 ชุดไว้ในตัวครับ
+        self.primary_email = os.getenv('AGENT_API_EMAIL')
+        self.primary_password = os.getenv('AGENT_API_PASSWORD')
+        self.arnon_email = os.getenv('AGENT_ARNON_EMAIL')
+        self.arnon_password = os.getenv('AGENT_ARNON_PASSWORD')
+
+        # เลือกเมล์ที่จะใช้เริ่มต้น
+        self.email = email or self.primary_email or self.arnon_email or 'agent@example.com'
+        self.password = password or self.primary_password or self.arnon_password or 'password123'
+        self.token = os.getenv('AGENT_API_TOKEN')
+        
+        # Staff Credentials
         self.staff_email = os.getenv('STAFF_API_EMAIL') or os.getenv('AGENT_API_EMAIL_COLOR') or self.email
         self.staff_password = os.getenv('STAFF_API_PASSWORD') or os.getenv('AGENT_API_PASSWORD_COLOR') or self.password
         self.staff_token = os.getenv('STAFF_API_TOKEN')
         
-    def authenticate(self):
-        """
-        Login as agent and get the token (always fresh login).
-        """
-        # ถ้ามี token ใน .env ให้ใช้เฉพาะตอนยังไม่ได้ Login เท่านั้น
-        # (ไม่ข้าม login ถ้ามี token เก่า เพราะอาจ expired)
-        if not self.email or not self.password:
-            # กรณีที่ไม่มี email/password ใน .env ให้ใช้ token จาก .env แทน
-            if self.token:
-                print("ℹ️ ใช้ AGENT_API_TOKEN จาก .env (ไม่มี email/password)")
-                return True
-            print("❌ ไม่มี email/password และไม่มี token ใน .env")
-            return False
-        
-        print("🔐 Authenticating Agent API...")
-        url = f"{self.base_url}/api/agent/login"
-        payload = {
-            "email": self.email,
-            "password": self.password
-        }
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json"
-        }
-        
-        max_login_retries = 2
-        for attempt in range(max_login_retries + 1):
-            try:
-                response = requests.post(url, json=payload, headers=headers, timeout=15)
-                
-                if response.status_code == 500 and attempt < max_login_retries:
-                    print(f"⚠️ Agent Authentication Failed (500): Server error. Retrying in 5s... (Attempt {attempt+1}/{max_login_retries})")
-                    time.sleep(5)
-                    continue
-                    
-                response.raise_for_status()
-                res_json = response.json()
-                
-                # --- ดึง Token จาก data -> token ตามตัวอย่าง Log ---
-                token_data = res_json.get("data", {})
-                new_token = token_data.get("token") or res_json.get("token")
-                
-                if new_token:
-                    self.token = new_token
-                    print(f"✅ Agent Authentication Successful for '{self.email}'.")
-                    return True
-                else:
-                    print(f"❌ Authentication Error: Token not found in response. {res_json}")
-                    return False
-            except Exception as e:
-                if attempt == max_login_retries:
-                    err_msg = f"❌ Agent Auth Failed ({response.status_code if 'response' in locals() else 'Unknown'}): {response.text if 'response' in locals() else str(e)}"
-                    print(err_msg)
-                    return False
-                time.sleep(2)
-        return False
-
-    def authenticate_staff(self):
-        """
-        Login as STAFF member and get the token (Required for Project Creation).
-        """
-        if not self.staff_email or not self.staff_password:
-            print("❌ No STAFF_API_EMAIL/PASSWORD found in .env")
-            return False
-        
-        print(f"🔐 Authenticating STAFF API ({self.staff_email})...")
-        url = f"{self.base_url}/api/staff/login"
-        payload = {
-            "email": self.staff_email,
-            "password": self.staff_password
-        }
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json"
-        }
-        
-        try:
-            response = requests.post(url, json=payload, headers=headers, timeout=15)
-            if response.status_code in [200, 201]:
-                res_json = response.json()
-                token_data = res_json.get("data", {})
-                new_token = token_data.get("token") or res_json.get("token")
-                
-                if new_token:
-                    self.token = new_token
-                    self.staff_token = new_token
-                    print(f"✅ Staff Authentication Successful for '{self.staff_email}'.")
-                    return True
-                else:
-                    print(f"❌ Staff Auth Error: Token not found. {res_json}")
-                    return False
-            else:
-                print(f"❌ Staff Auth Failed ({response.status_code}): {response.text}")
-                return False
-        except Exception as e:
-            print(f"❌ Staff Auth Exception: {e}")
-            return False
-
-    def authenticate(self):
+    def authenticate(self, use_arnon=False):
         """
         [AGENT] Login to Agent API to get access token.
-        Endpoint: /agent/login
+        ถ้า use_arnon=True จะบังคับใช้เมล์ของคุณ Arnon ครับ
         """
+        if use_arnon:
+            if not self.arnon_email:
+                print("❌ Cannot use Arnon fallback: AGENT_ARNON_EMAIL not set.")
+                return False
+            self.email = self.arnon_email
+            self.password = self.arnon_password
+            self.token = None 
+        else:
+            self.email = self.primary_email
+            self.password = self.primary_password
+        
         if self.token: return True
         
-        # สำหรับ AGENT ให้ยิงไปที่ /api/agent/login
         base = self.base_url.rstrip('/')
-        if '/api' in base:
-            login_url = f"{base}/agent/login"
-        else:
-            login_url = f"{base}/api/agent/login"
+        login_url = f"{base}/agent/login" if '/api' in base else f"{base}/api/agent/login"
             
         payload = {"email": self.email, "password": self.password}
         
-        # 🕵️‍♂️ ส่องสถานะกุญแจ: ปริ้นท์เมล์ออกมาโชว์ให้บอสเห็นหน้างานเลยครับ
         print(f"🔐 Authenticating Agent API...")
         print(f"   📧 Using Email: '{self.email}'")
         print(f"   🌐 URL Target: {login_url}")
@@ -142,7 +57,6 @@ class APIService:
             response = requests.post(login_url, json=payload, timeout=20)
             if response.status_code == 200:
                 res_json = response.json()
-                # 🕵️‍♂️ ดักจับ Token ทั้งแบบ Root และแบบที่อยู่ใน Data ห่อหุ้ม
                 self.token = res_json.get('token') or res_json.get('data', {}).get('token')
                 
                 if self.token:

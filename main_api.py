@@ -184,72 +184,96 @@ def process_property_analysis(property_id: int):
     api.authenticate()
     fs = FirestoreService()
 
-    # 2. Fetch Property Detail from Agent API
-    try:
-        base = api.base_url.rstrip('/')
-        url_prop = f"{base}/api/agent/properties/{property_id}/status"
-        headers_prop = api._get_auth_headers()
-
-        logger.info(f"   🌐 Fetching Detail: {url_prop}")
-        r_prop = requests.get(url_prop, headers=headers_prop, timeout=15)
-        res_json = r_prop.json()
-        prop_data = res_json.get('data', res_json)
-
-        # Check property type (condo vs house)
-        prop_type_name = str(prop_data.get("property_type", {}).get("name", "")).strip()
-        is_condo = "condo" in prop_type_name.lower() or "apartment" in prop_type_name.lower()
-
-        # Get existing specs (floors, bedrooms, bathrooms)
-        existing_specs = parse_specs_from_property(prop_data)
-
-        images_info = prop_data.get('images', [])
-        gallery_images = [img for img in images_info if img.get("tag") != "Common facilities"]
-
-        if not gallery_images:
-            logger.warning(f"⚠️ No gallery images for Property {property_id}.")
-            return
-
-        img_ids = [img.get("id") for img in gallery_images if img.get("id")]
-        logger.info(f"📸 Found {len(img_ids)} gallery images")
-
-    except Exception as e:
-        logger.error(f"❌ Failed to fetch property data: {e}")
-        return
-
-    # 3. Refresh photo URLs
-    try:
-        url_map = {}
-        refreshed = api.refresh_photo_urls(img_ids)
-        if refreshed and isinstance(refreshed, dict):
-            items = refreshed.get("refreshed_images") or refreshed.get("data", {}).get("refreshed_images", [])
-            for item in items:
-                url_map[str(item.get("id"))] = item.get("url")
-    except Exception as e:
-        logger.warning(f"⚠️ URL refresh failed: {e}")
-
-    # 4. Download & compress images (ใช้ Signed URL ที่ได้จาก refreshing)
+    # 2. Fetch Property Detail & Download Images (with Dynamic Fallback)
+    prop_data = None
     image_parts = []
     original_image_ids = []
+    is_condo = True
+    prop_type_name = "Unknown"
+    existing_specs = {}
+
+    def try_fetch_and_download(current_api):
+        nonlocal prop_data, image_parts, original_image_ids, is_condo, prop_type_name, existing_specs
+        try:
+            base = current_api.base_url.rstrip('/')
+            url_prop = f"{base}/api/agent/properties/{property_id}/status"
+            headers_prop = current_api._get_auth_headers()
+
+            logger.info(f"   🌐 Fetching Detail: {url_prop}")
+            r_prop = requests.get(url_prop, headers=headers_prop, timeout=15)
+            
+            # 🛑 ถ้าติด 403 หรือ 401 แสดงว่าบัญชีนี้ไม่มีสิทธิ์
+            if r_prop.status_code in [403, 401]:
+                return False, "forbidden"
+
+            r_prop.raise_for_status()
+            res_json = r_prop.json()
+            prop_data = res_json.get('data', res_json)
+
+            # Check property type
+            prop_type_name = str(prop_data.get("property_type", {}).get("name", "")).strip()
+            is_condo = "condo" in prop_type_name.lower() or "apartment" in prop_type_name.lower()
+            existing_specs = parse_specs_from_property(prop_data)
+
+            images_info = prop_data.get('images', [])
+            gallery_images = [img for img in images_info if img.get("tag") != "Common facilities"]
+
+            if not gallery_images:
+                logger.warning(f"⚠️ No gallery images for Property {property_id}.")
+                return True, "no_images"
+
+            img_ids = [img.get("id") for img in gallery_images if img.get("id")]
+            logger.info(f"📸 Found {len(img_ids)} gallery images")
+
+            # Refresh photo URLs
+            url_map = {}
+            refreshed = current_api.refresh_photo_urls(img_ids)
+            if refreshed and isinstance(refreshed, dict):
+                items = refreshed.get("refreshed_images") or refreshed.get("data", {}).get("refreshed_images", [])
+                for item in items:
+                    url_map[str(item.get("id"))] = item.get("url")
+
+            # Download images
+            image_parts = []
+            original_image_ids = []
+            api_domain = current_api.base_url.split("//")[-1].split("/")[0]
+            download_headers = {"Referer": f"https://{api_domain}/", "Accept": "image/webp,image/apng,image/*,*/*;q=0.8"}
+
+            for img_meta in gallery_images[:15]:
+                img_id_str = str(img_meta.get("id"))
+                img_url = url_map.get(img_id_str) or img_meta.get("url")
+                part = download_image_as_part(img_url, custom_headers=download_headers, agent_token=current_api.token)
+                
+                # ถ้าโหลดรูปแล้วติด 403 แสดงว่า Token บัญชีนี้อาจจะเข้าถึง Media ไม่ได้
+                if part:
+                    image_parts.append(part)
+                    original_image_ids.append(img_id_str)
+                else:
+                    # ถ้าโหลดไม่ได้เลยสักรูปเดียว และติด 403 (เช็คใน download_image_as_part logger ถ้าเป็นไปได้)
+                    # ในที่นี้ถ้า image_parts ยังว่างหลังจากลองไปบ้างแล้ว เราอาจจะสงสัยว่าเป็นเพราะสิทธิ์
+                    pass
+            
+            if not image_parts:
+                return False, "forbidden_images"
+            
+            return True, "success"
+        except Exception as e:
+            logger.error(f"❌ Error in try_fetch_and_download: {e}")
+            return False, "error"
+
+    # ลองครั้งแรกด้วยบัญชี Default (Automation)
+    success, reason = try_fetch_and_download(api)
     
-    # ดึงค่า Domain จาก API Base URL เพื่อทำ Referer ป้องกัน 403
-    api_domain = api.base_url.split("//")[-1].split("/")[0]
-    download_headers = {
-        "Referer": f"https://{api_domain}/",
-        "Accept": "image/webp,image/apng,image/*,*/*;q=0.8"
-    }
-
-    for img_meta in gallery_images[:15]:
-        img_id_str = str(img_meta.get("id"))
-        # สำคัญ: ต้องใช้ Signed URL จาก map ที่เราเพิ่ง Refresh มา (ถ้ามี)
-        img_url = url_map.get(img_id_str) or img_meta.get("url")
-        
-        part = download_image_as_part(img_url, custom_headers=download_headers, agent_token=api.token)
-        if part:
-            image_parts.append(part)
-            original_image_ids.append(img_id_str)
-
-    if not image_parts:
-        logger.error(f"❌ Could not download any images for Property {property_id}")
+    # 🔄 ถ้าติดเรื่องสิทธิ์ ให้สลับไปใช้บัญชี Arnon
+    if not success and reason in ["forbidden", "forbidden_images"]:
+        logger.warning(f"⚠️ Account '{api.email}' got {reason} for Property {property_id}. Swapping to Arnon account...")
+        if api.authenticate(use_arnon=True):
+            success, reason = try_fetch_and_download(api)
+        else:
+            logger.error("❌ Failed to authenticate with Arnon fallback.")
+    
+    if not success:
+        logger.error(f"❌ Could not process Property {property_id}: {reason}")
         return
 
     # 5. Build prompt (ตรงกับ arnon_step2)

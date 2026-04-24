@@ -42,7 +42,7 @@ def init_services():
         "sheets": sheets
     }
 
-def run_scraping_job(selected_type, selected_zone, max_items_override=None):
+def run_scraping_job(selected_type, selected_zone, max_items_override=None, is_manual=False):
     from src.config import MAX_RETRIES
     import src.config as config
     
@@ -76,7 +76,7 @@ def run_scraping_job(selected_type, selected_zone, max_items_override=None):
         print(f"\n--- Agent Action: Searching for '{selected_type}' in '{selected_zone}' (Attempt {retries + 1}/{MAX_RETRIES}) ---")
 
         # scraper agent will login (if session not exist), and scrape raw details from specific URLs
-        scraped_listings = scraper.scrape_living_insider(target_url, property_type=selected_type, zone=selected_zone)
+        scraped_listings = scraper.scrape_living_insider(target_url, property_type=selected_type, zone=selected_zone, is_manual=is_manual)
         
         print("\n--- Processing Phase (Real-time Scraping & Saving) ---")
         
@@ -161,7 +161,7 @@ def run_scraping_job(selected_type, selected_zone, max_items_override=None):
             # --- DATA STORAGE SELECTION (DEBUG vs PRODUCTION) ---
             if DEBUG_MODE:
                 # 1. Option A: Save to Google Sheets (Debug)
-                print(f"📊 [Debug] Saving to Google Sheet (26 Columns) for {listing_id}...")
+                print(f"📊 [Debug] Saving to Google Sheet (27 Columns) for {listing_id}...")
                 if sheets:
                     # ปรับโครงสร้าง Rows ให้ตรงกับ 26 คอลัมน์ที่คุณต้องการ
                     # 1.วันที่ลง, 2.วันที่โทร, 3.สถานะการโทร, 4.ขอสแกน, 5.เข้าดูห้อง, 6.วันที่เข้าดู, 7.สแกน,
@@ -198,7 +198,8 @@ def run_scraping_job(selected_type, selected_zone, max_items_override=None):
                         "-", # 23. Feedback
                         first_image, # 24. ภาพห้อง
                         "-", # 25. โหลดรูป
-                        selected_type # 26. ประเภททรัพย์
+                        ai_evaluation.get("property_type") or raw_data.get("property_type") or selected_type, # 26. ประเภททรัพย์
+                        ai_evaluation.get("zone") or raw_data.get("zone", "-")               # 27. Zone
                     ]
                     sheets.append_data(sheet_row)
                     print(f"✅ Data appended to Google Sheets (U={raw_data.get('url')[:30]}...)")
@@ -256,11 +257,24 @@ def run_scraping_job(selected_type, selected_zone, max_items_override=None):
 def main():
     start_time = datetime.now()
     print("=== Starting Agentic AI Scraping Workflow (Detailed Hybrid) ===")
+    
+    print("\nกรุณาเลือกโหมดการทำงาน:")
+    print("1. Auto Mode (รันอัตโนมัติตามค่าที่สุ่ม)")
+    print("2. Manual Mode (เปิดหน้าต่างให้ Login และ Filter เอง จากนั้นบอทจะไล่ดึงให้)")
+    mode = input("เลือก (1 หรือ 2) [Default=1]: ").strip()
+    is_manual = (mode == "2")
+    
     from src.config import PROPERTY_TYPES, TARGET_ZONES
     import random
-    selected_type = random.choice(PROPERTY_TYPES)
-    selected_zone = random.choice(TARGET_ZONES)
-    run_scraping_job(selected_type, selected_zone)
+    
+    if is_manual:
+        selected_type = "Manual"
+        selected_zone = "Manual"
+    else:
+        selected_type = random.choice(PROPERTY_TYPES)
+        selected_zone = random.choice(TARGET_ZONES)
+        
+    run_scraping_job(selected_type, selected_zone, is_manual=is_manual)
     
     end_time = datetime.now()
     elapsed_time = end_time - start_time

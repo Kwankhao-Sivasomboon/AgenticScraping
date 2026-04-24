@@ -50,6 +50,8 @@ class EvaluatorAgent:
         19. "specification_values": เป็นอ็อบเจ็กต์ JSON ได้แก่: "common_facilities" (Array string), "furniture_items" (Array string)
         20. "direction": ทิศของระเบียงหรือหน้าบ้าน (เช่น "เหนือ", "ใต้", "ตะวันออก", "ตะวันตก", "ตะวันออกเฉียงเหนือ", "ตะวันออกเฉียงใต้", "ตะวันตกเฉียงเหนือ", "ตะวันตกเฉียงใต้")
         21. "furnishing": สภาพเฟอร์นิเจอร์ เลือกจาก: "โนเฟอร์", "เฟอร์นิเจอร์บางส่วน", "เฟอร์นิเจอร์ครบ" (หากไม่ทราบให้ใส่ null)
+        22. "property_type": ประเภทอสังหาฯ (เช่น "คอนโด", "บ้านเดี่ยว", "ทาวน์โฮม", "ที่ดิน")
+        23. "zone": โซนหรือทำเลที่ตั้ง (เช่น "รัชดา", "ห้วยขวาง", "สุขุมวิท", "พระราม 9")
 
         ข้อมูลชื่อเจ้าของที่บอทขูดมาได้เบื้องต้น (Extracted Owner Name):
         {parsed_data.get('owner_name', 'null')}
@@ -105,5 +107,7 @@ class EvaluatorAgent:
             "longitude": "-",
             "specifications": {},
             "specification_values": {},
-            "direction": "ไม่ระบุทิศ"
+            "direction": "ไม่ระบุทิศ",
+            "property_type": "-",
+            "zone": "-"
         }

@@ -2,6 +2,7 @@ import os
 import re
 import time
 import sys
+import random
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
@@ -13,6 +14,7 @@ load_dotenv()
 
 # ⚙️ Config
 FORCE_RE_SCRAPE = False  # 🚩 ตั้งเป็น True ถ้าต้องการทำใหม่ทั้งหมดแม้จะมีข้อมูลแล้ว
+SCRAPE_MISSING_COMMON_FEE_ONLY = True # 🚩 ตั้งเป็น True ถ้าต้องการดึงเฉพาะอันที่ค่าส่วนกลางแหว่ง
 TEST_LIMIT = None       # ตั้งเป็น None เพื่อทำทั้งหมด
 COLLECTION = "Leads"
 GSE_UI_URL = "https://cse.google.com/cse?cx=86685f14ed57d4f5d"
@@ -23,20 +25,53 @@ def find_zmyhome_url_gse_ui(page, project_name: str) -> str | None:
     """
     print(f"      🔍 GSE UI Search: '{project_name}'")
     try:
-        # 1. เข้าหน้า CSE UI (ใช้การพิมพ์แทนการใส่ใน URL Hash เพื่อความชัวร์)
+        # หน่วงเวลาเล็กน้อยก่อนเริ่มแต่ละโครงการเพื่อความเนียน
+        time.sleep(random.uniform(1.0, 2.0))
+        
         page.goto(GSE_UI_URL, wait_until="networkidle", timeout=30000)
         
-        # ค้นหาช่องค้นหาและพิมพ์
+        # ค้นหาช่องค้นหาและค่อยๆ พิมพ์ (เหมือนคน)
         search_box = page.locator("input.gsc-input")
-        search_box.fill(f"zmyhome project {project_name}")
+        search_box.fill("") # ล้างของเก่า
+        search_box.type(f"zmyhome project {project_name}", delay=random.randint(50, 100))
         search_box.press("Enter")
         
-        # 2. รอให้ผลลัพธ์ขึ้นและ "Visible" (ไม่ hidden)
-        # ใช้สมาธิรอ .gsc-webResult ที่แสดงผลจริง
-        page.wait_for_selector(".gsc-webResult", state="visible", timeout=15000)
-        page.wait_for_timeout(2000) # รอให้นิ่ง
+        # 🛡️ ตรวจจับ CAPTCHA หรือ Unusual Traffic
+        try:
+            # รอผลลัพธ์แบบเจาะจงว่าต้อง 'visible'
+            page.wait_for_selector(".gsc-webResult", state="visible", timeout=10000)
+        except:
+            # ตรวจสอบว่าโดน CAPTCHA หรือไม่
+            content = page.content().lower()
+            if "captcha" in content or "unusual traffic" in content or "robot" in content:
+                print("\n" + "!"*60)
+                print("🛑 GOOGLE CAPTCHA DETECTED!")
+                print("👉 บอสครับ รบกวนช่วยแก้ CAPTCHA ในหน้าต่างเบราว์เซอร์ให้หน่อยครับ")
+                print("👉 พอแก้เสร็จแล้ว โค้ดจะรันต่อเองอัตโนมัติครับ...")
+                print("!"*60 + "\n")
+                
+                # รอนานขึ้นเพื่อให้บอสแก้ (รอจนกว่าผลลัพธ์จะมา หรือรอ 2 นาที)
+                try:
+                    page.wait_for_selector(".gsc-webResult", state="visible", timeout=120000)
+                    print("✅ CAPTCHA Solved! Resuming...")
+                except:
+                    print("⚠️ Timeout waiting for CAPTCHA solving.")
+                    return None
+            else:
+                # ถ้าไม่มา ลอง Reload 1 ครั้ง
+                print(f"      ⚠️ Results not visible, reloading page...")
+                page.reload(wait_until="networkidle")
+                page.locator("input.gsc-input").fill(f"zmyhome project {project_name}")
+                page.keyboard.press("Enter")
+                try:
+                    page.wait_for_selector(".gsc-webResult", state="visible", timeout=10000)
+                except:
+                    return None
         
-        # 3. ดึงลิงก์
+        # รอให้นิ่งอีกนิด
+        time.sleep(1)
+        
+        # ดึงลิงก์
         links = page.evaluate('''() => {
             let results = [];
             let anchors = document.querySelectorAll("a.gs-title");
@@ -122,10 +157,15 @@ def main():
         
         # 🕵️‍♂️ ลอจิก Skip: ทำงานเฉพาะเมื่อไม่ได้สั่ง FORCE_RE_SCRAPE
         if not FORCE_RE_SCRAPE:
-            filled = sum(1 for f in core_fields if data.get(f) and data.get(f) != "" and data.get(f) != [])
-            if filled >= 3:
-                skipped += 1
-                continue
+            if SCRAPE_MISSING_COMMON_FEE_ONLY:
+                if data.get("zmyh_common_fee") and str(data.get("zmyh_common_fee")).strip() != "":
+                    skipped += 1
+                    continue
+            else:
+                filled = sum(1 for f in core_fields if data.get(f) and data.get(f) != "" and data.get(f) != [])
+                if filled >= 3:
+                    skipped += 1
+                    continue
                 
         p_name = data.get("project_name") or data.get("sheet_ชื่อโครงการ")
         if p_name:
@@ -135,9 +175,11 @@ def main():
     print(f"📊 Projects to process: {len(projects_map)} (Skipped: {skipped})")
 
     with sync_playwright() as p:
-        # 📺 เปิดโหมดโชว์หน้าจอ (headless=False) และชะลอการทำงาน (slow_mo) เพื่อให้บอสดูทัน
-        browser = p.chromium.launch(headless=False, slow_mo=300)
-        context = browser.new_page()
+        # 🚀 เปลี่ยนเป็นแบบเปิดหน้าจอ (headless=False) เพื่อลดการโดน Google Block
+        browser = p.chromium.launch(headless=False)
+        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        context = browser.new_context(user_agent=user_agent)
+        page = context.new_page()
         
         count = 0
         for p_name, p_docs in projects_map.items():
@@ -157,10 +199,10 @@ def main():
             else:
                 if existing_url and "marker" in existing_url:
                     print(f"      🚨 Found bad marker URL, re-searching...")
-                target_url = find_zmyhome_url_gse_ui(context, p_name)
+                target_url = find_zmyhome_url_gse_ui(page, p_name)
             
             if target_url:
-                scraped = scrape_zmyhome_project_page(context, target_url)
+                scraped = scrape_zmyhome_project_page(page, target_url)
                 if scraped:
                     payload = {"zmyh_scraped": True}
                     for k, v in scraped.items(): payload[f"zmyh_{k}"] = v
@@ -171,7 +213,8 @@ def main():
             else:
                 print(f"      ⏭️ Not Found")
             
-            time.sleep(1)
+            # 😴 พักหายใจให้นานขึ้นหน่อย (4 - 7 วินาที) เพื่อความปลอดภัย
+            time.sleep(random.uniform(4.0, 7.0))
         
         browser.close()
 

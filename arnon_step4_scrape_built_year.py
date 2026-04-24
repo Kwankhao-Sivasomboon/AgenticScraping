@@ -259,6 +259,9 @@ def scrape_zmyhome_data(project_name, property_type=""):
                     elif "ยูนิตทั้งหมด" in label: res["total_units"] = val
                     elif "พื้นที่จอดรถ" in label: res["parking"] = val
                     elif "จำนวนชั้น" in label: res["max_floors"] = val
+                    elif "ค่าส่วนกลาง" in label: res["common_fee"] = val
+                    elif "พื้นที่โครงการ" in label: res["project_area"] = val
+                    elif "จำนวนตึก" in label: res["num_buildings"] = val
                 
                 txt = li.get_text(strip=True)
                 if "ผู้พัฒนา :" in txt: res["developer"] = txt.replace("ผู้พัฒนา :", "").strip()

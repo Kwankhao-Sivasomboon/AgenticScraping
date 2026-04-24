@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 from urllib.parse import quote
 from playwright.sync_api import sync_playwright
-from playwright_stealth import stealth_sync
+from playwright_stealth import Stealth
 from src.config import MAX_ITEMS_PER_RUN, SKIP_KEYWORDS, MAX_PRICE_LIMITS, SHOW_BROWSER
 
 class ScraperAgent:
@@ -338,9 +338,9 @@ class ScraperAgent:
             except:
                 pass
             return False
-    def scrape_living_insider(self, target_url, property_type="คอนโด", zone="อ่อนนุช"):
+    def scrape_living_insider(self, target_url, property_type="คอนโด", zone="อ่อนนุช", is_manual=False):
         yielded_count = 0
-        launch_args = {"headless": not SHOW_BROWSER, "args": ["--no-sandbox", "--disable-setuid-sandbox"]}
+        launch_args = {"headless": False if is_manual else not SHOW_BROWSER, "args": ["--no-sandbox", "--disable-setuid-sandbox"]}
         if self.use_proxy and self.proxy_server:
             launch_args["proxy"] = {"server": self.proxy_server, "username": self.proxy_username, "password": self.proxy_password}
 
@@ -354,18 +354,26 @@ class ScraperAgent:
             context.add_init_script("window.addEventListener('DOMContentLoaded',()=>{const s=document.createElement('style');s.innerHTML='#modal-condition-istock,.modal-backdrop,.PopupAds{display:none!important;pointer-events:none!important;}';document.documentElement.appendChild(s);});")
             
             page = context.new_page()
-            stealth_sync(page)
+            Stealth().apply_stealth_sync(page)
             
-            self.login(page, context)
-            self.close_banners(page)
-            
-            try:
-                self.select_owner(page)
-                self.select_property_type(page, p_type=property_type)
-                if zone: 
-                    self.search_zone(page, zone)
-            except Exception as e:
-                print(f"⚠️ Filtering error: {e}")
+            if is_manual:
+                print("\n" + "="*50)
+                print("🛠️ MANUAL MODE ACTIVATED")
+                print("="*50)
+                page.goto('https://www.livinginsider.com/', wait_until='domcontentloaded')
+                input("\n1️⃣ กรุณา Login และ Filter ข้อมูลให้เรียบร้อยบนหน้าต่างเบราว์เซอร์\n2️⃣ เมื่อได้หน้าผลลัพธ์ที่ต้องการแล้ว ให้กด Enter ที่นี่เพื่อเริ่มดึงข้อมูล...\n> ")
+                print("\n🚀 เริ่มต้นดึงข้อมูลอัตโนมัติจากหน้าที่เปิดอยู่...")
+            else:
+                self.login(page, context)
+                self.close_banners(page)
+                
+                try:
+                    self.select_owner(page)
+                    self.select_property_type(page, p_type=property_type)
+                    if zone: 
+                        self.search_zone(page, zone)
+                except Exception as e:
+                    print(f"⚠️ Filtering error: {e}")
 
             current_page = 1
             while yielded_count < MAX_ITEMS_PER_RUN:
@@ -472,7 +480,7 @@ class ScraperAgent:
                     
                     print(f"Scraping: {url}")
                     dp = context.new_page()
-                    stealth_sync(dp)
+                    Stealth().apply_stealth_sync(dp)
                     try:
                         # 1. รอให้หน้าโหลดสมบูรณ์ขึ้นอีกนิด
                         dp.goto(url, wait_until='load', timeout=45000)
@@ -566,8 +574,19 @@ class ScraperAgent:
                         
                         # 3. ใช้ locator ดึงข้อความ "เฉพาะส่วนเนื้อหาประกาศ" (ป้องกันขยะจาก Header/Footer)
                         raw_text = ""
+                        breadcrumb_info = {}
                         try:
-                            # ดึงด้วย JavaScript เพื่อกวาดเฉพาะส่วนที่ต้องการจริงๆ เท่านั้นแบบเป็นชิ้นๆ
+                            # 3.0 ดึง Breadcrumbs เพื่อเอาประเภททรัพย์และโซน
+                            breadcrumb_info = dp.evaluate("""() => {
+                                let items = Array.from(document.querySelectorAll('.breadcrumb li, ol.breadcrumb li, .breadcrumb-list li'));
+                                let texts = items.map(li => li.innerText.trim()).filter(t => t && t !== 'Living Insider' && t !== 'LivingInsider' && t !== 'หน้าแรก');
+                                return {
+                                    property_type: texts[0] || "",
+                                    zone: texts[1] || ""
+                                };
+                            }""")
+
+                            # 3.1 ดึงด้วย JavaScript เพื่อกวาดเฉพาะส่วนที่ต้องการจริงๆ เท่านั้นแบบเป็นชิ้นๆ
                             raw_text = dp.evaluate("""() => {
                                 let parts = [];
                                 
@@ -649,6 +668,35 @@ class ScraperAgent:
                             print(f"⚠️ ดึงภาพไม่สำเร็จ: {img_err}")
                             image_urls = []
                         # =====================================
+
+                        # ======== ดึงข้อมูล Project Details (built_year, floors, units ฯลฯ) ========
+                        project_details = {}
+                        try:
+                            project_text = dp.evaluate('''() => {
+                                let el = document.querySelector('.box-show-text-all-project');
+                                return el ? el.innerText.replace(/[\\n\\r]+/g, ' ').trim() : "";
+                            }''')
+                            if project_text:
+                                yr_m = re.search(r'สร้างเสร็จปี\s*(\d{4})', project_text)
+                                if yr_m: project_details['built_year'] = int(yr_m.group(1))
+                                
+                                b_m = re.search(r'จำนวนอาคารในโครงการนี้มีทั้งหมด\s*(\d+)\s*อาคาร', project_text)
+                                if b_m: project_details['scraped_num_buildings'] = int(b_m.group(1))
+                                
+                                f_m = re.search(r'มีความสูง\s*(\d+)\s*ชั้น', project_text)
+                                if f_m: project_details['scraped_max_floors'] = int(f_m.group(1))
+                                
+                                u_m = re.search(r'มีจำนวนห้องพักอาศัยจำนวน\s*(\d+)\s*ยูนิต', project_text)
+                                if u_m: project_details['scraped_total_units'] = int(u_m.group(1))
+                                
+                                addr_m = re.search(r'มีสถานที่ตั้งโครงการอยู่ที่\s+(.*?)(?=\s+จำนวนอาคาร|\s+สร้างเสร็จปี|$)', project_text)
+                                if addr_m: project_details['scraped_address'] = addr_m.group(1).strip()
+                                
+                                name_m = re.search(r'ข้อมูลเกี่ยวกับโครงการ\s+(.*?)\s+มีสถานที่ตั้งโครงการอยู่ที่', project_text)
+                                if name_m: project_details['scraped_project_name'] = name_m.group(1).strip()
+                        except Exception as proj_err:
+                            pass
+                        # =====================================
                         
                         # 4. ส่งข้อมูลออกทันทีด้วย yield (ช่วยประหยัด RAM และเซฟได้ทันที)
                         if raw_text and len(raw_text.strip()) > 0:
@@ -657,8 +705,11 @@ class ScraperAgent:
                                 "url": url, 
                                 "images": image_urls,
                                 "owner_name": owner_name,
+                                "property_type": breadcrumb_info.get('property_type', ''),
+                                "zone": breadcrumb_info.get('zone', ''),
                                 "extracted_phone": ", ".join(hidden_contacts) if hidden_contacts else "-",
-                                "raw_text": raw_text[:5000]
+                                "raw_text": raw_text[:5000],
+                                **project_details
                             }
                             yielded_count += 1
                             print(f"✅ ขูดสำเร็จ (รายการที่ {yielded_count}/{MAX_ITEMS_PER_RUN}) - กำลังส่งไปวิเคราะห์...")
