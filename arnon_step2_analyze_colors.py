@@ -14,8 +14,9 @@ from src.services.api_service import APIService
 
 load_dotenv()
 
-# ⚙️ ตั้งค่าคอลเลกชันที่ต้องการบันทึกข้อมูล (เปลี่ยนเป็น 'ARNON_properties' ได้ที่นี่)
+# ⚙️ ตั้งค่าคอลเลกชันที่ต้องการบันทึกข้อมูล
 TARGET_COLLECTION = "Launch_Properties"
+SECONDARY_COLLECTION = "arnon_properties" # สำหรับงานที่เป็นของคุณอานนท์ (Fallback)
 
 # English mapping for the 14 colors
 ENGLISH_COLORS = [
@@ -34,12 +35,9 @@ class PropertyAnalysis(BaseModel):
     element_room: List[str] = Field(description="List of 14 strings. Each string 'i' contains comma-separated English names of structural elements (e.g. wall, door, floor, ceiling, roof) in that exact color 'i'. If empty, use \"\". Max 10 items per color.")
     element_color: List[int] = Field(description="Aggregated 14-color percentage for Furniture in the same order.")
     element_furniture: List[str] = Field(description="List of 14 strings. Each string 'i' contains unique comma-separated furniture names in that color 'i'. If empty, use \"\". Max 10 items per color.")
-    lighting_conditions: str = Field(description="Detailed description of lighting in the photos (e.g., 'Warm white bulbs', 'Natural daylight through windows', 'Dim low-light').")
-    wall_reflections: str = Field(description="Detailed description of any light reflections on walls or floors (e.g., 'High gloss reflection on tiles', 'Soft window reflection on wall', 'Matte - no reflection').")
 
 def download_image_as_part(url: str, agent_token: str = None):
     headers = {"User-Agent": "Mozilla/5.0"}
-    # 🔑 app.yourhome.co.th media URLs ต้องใช้ Bearer Token ถึงจะส่งรูปมาให้ (เหมือน Browser ที่มี Session Cookie)
     if agent_token:
         headers["Authorization"] = f"Bearer {agent_token}"
     try:
@@ -48,17 +46,16 @@ def download_image_as_part(url: str, agent_token: str = None):
             img = Image.open(BytesIO(r.content))
             if img.mode != 'RGB':
                 img = img.convert('RGB')
-            img.thumbnail((512, 512)) # ลดให้พอเหมาะ
+            img.thumbnail((512, 512))
             buffer = BytesIO()
             img.save(buffer, format="JPEG", quality=80) 
-            return types.Part.from_bytes(data=buffer.getvalue(), mime_type='image/jpeg')
+            return types.Part.from_bytes(data=buffer.getvalue(), mime_type='image/jpeg'), 200
         elif r.status_code == 403:
-            print(f"      [!] 403 Forbidden: รูปภาพถูกลบหรือปิดกั้นที่ต้นทาง")
+            return None, 403
         else:
-            print(f"      [!] Download failed: Status {r.status_code}")
+            return None, r.status_code
     except Exception as e:
-        print(f"      [!] Download error: {e}")
-    return None
+        return None, 999
 
 def analyze_arnon_properties():
     # 🚀 กลับมาใช้ Gemini 2.5 Flash เพื่อความเสถียร (รุ่น 3 Preview ดูเหมือนจะทำให้เกิดอาการค้างในบางช่วง)
@@ -111,6 +108,42 @@ def analyze_arnon_properties():
             print(f"⚠️ Skip {prop_id}: ไม่มีภาพ gallery ให้วิเคราะห์")
             continue
 
+        # ------------------------------------------------------
+        # 1. Check Property Detail & Owner BEFORE anything else
+        # ------------------------------------------------------
+        headers = api._get_auth_headers()
+        base_url = api.base_url.rstrip('/')
+        prop_type_name = "Unknown"
+        is_condo = False
+        is_arnon_fallback = False
+        
+        try:
+            r_detail = requests.get(f"{base_url}/api/agent/properties/{prop_id}", headers=headers, timeout=10)
+            if r_detail.status_code == 200:
+                p_data = r_detail.json().get("data", {})
+                
+                # 🕵️‍♂️ Check Owner: ถ้าเป็นของอานนท์ ให้สลับไปใช้บัญชีอานนท์ทันที
+                owner_email = p_data.get("owner", {}).get("email", "").lower()
+                arnon_email_env = (os.getenv("AGENT_ARNON_EMAIL") or "arnon@painpointtoday.com").lower()
+                
+                if owner_email == arnon_email_env:
+                    print(f"      🎯 Property owner is Arnon ({owner_email}). Switching to Arnon account...")
+                    if api.authenticate(use_arnon=True):
+                        is_arnon_fallback = True
+                        headers = api._get_auth_headers() # Update headers
+                    else:
+                        print("      ❌ Failed to switch to Arnon account.")
+
+                prop_type_name = str(p_data.get("property_type", {}).get("name", "")).strip()
+                is_arnon_owner = (owner_email == arnon_email_env)
+                if "condo" in prop_type_name.lower() or "apartment" in prop_type_name.lower():
+                    is_condo = True
+        except Exception as e:
+            print(f"      [!] Failed to check property_type/owner: {e}")
+
+        # ------------------------------------------------------
+        # 2. Refresh URLs & Download Images (using correct account)
+        # ------------------------------------------------------
         # 🔄 Refresh URLs (Batch)
         img_ids = [img.get("id") for img in gallery_images if img.get("id")]
         print(f"🔄 Refreshing Signed URLs for {len(img_ids)} images...")
@@ -127,35 +160,33 @@ def analyze_arnon_properties():
             for item in items:
                 url_map[str(item.get("id"))] = item.get("url")
             
-        # 📸 ดาวน์โหลดรูปและบีบอัดเป็นคำขอ JPEG ขนาดเล็ก
+        # 📸 ดาวน์โหลดรูป
         image_parts = []
         original_image_ids = []
+        
         for img_meta in gallery_images[:15]:
             img_url = url_map.get(str(img_meta.get("id"))) or img_meta.get("url")
-            part = download_image_as_part(img_url, agent_token=api.token)
+            part, status = download_image_as_part(img_url, agent_token=api.token)
+            
+            # Fallback เผื่อเจอ 403 แบบไม่คาดคิด (กรณีอื่นๆ)
+            if status == 403 and not is_arnon_fallback:
+                print(f"      ⚠️ Unexpected 403. Attempting fallback to Arnon account...")
+                if api.authenticate(use_arnon=True):
+                    is_arnon_fallback = True
+                    part, status = download_image_as_part(img_url, agent_token=api.token)
+
             if part:
                 image_parts.append(part)
                 original_image_ids.append(str(img_meta.get("id")))
         
         if not image_parts:
             print(f"❌ Property {prop_id}: ไม่สามารถโหลดรูปภาพได้เลย")
+            if is_arnon_fallback: api.authenticate(use_arnon=False)
             continue
 
-        # ดึง Property Type จาก Agent API สดๆ
-        headers = api._get_auth_headers()
-        base_url = api.base_url.rstrip('/')
-        prop_type_name = "Unknown"
-        is_condo = False
-        
-        try:
-            r_detail = requests.get(f"{base_url}/api/agent/properties/{prop_id}", headers=headers, timeout=10)
-            if r_detail.status_code == 200:
-                p_data = r_detail.json().get("data", {})
-                prop_type_name = str(p_data.get("property_type", {}).get("name", "")).strip()
-                if "condo" in prop_type_name.lower() or "apartment" in prop_type_name.lower():
-                    is_condo = True
-        except Exception as e:
-            print(f"      [!] Failed to check property_type: {e}")
+        # กำหนดคอลเลกชันปลายทาง
+        final_collection = SECONDARY_COLLECTION if is_arnon_fallback else TARGET_COLLECTION
+        print(f"      📥 Will save results to: '{final_collection}'")
 
         # ปรับกติกาย่อย (Dynamic Style Criteria)
         if is_condo:
@@ -180,10 +211,7 @@ def analyze_arnon_properties():
             "11. STRICTLY EXCLUDE all electrical appliances (AC, washing machines, refrigerators, TVs, microwaves, etc.).\n"
             "12. COHERENCE RULE (CRITICAL): If 'element_furniture[i]' is NOT empty, 'element_color[i]' MUST be > 0. If 'element_color[i]' is 0, 'element_furniture[i]' MUST be \"\".\n"
             "13. NO REPETITION & LIMIT: List at most 10 unique items per color string. DO NOT repeat the same word. Use plural (e.g., 'chairs') instead of repeating same text.\n"
-            "14. LIGHTING COMPENSATION: Photos often have warm yellow/orange lighting that can make White walls look Pink or Orange. Identify the ACTUAL material color as a human would see it in neutral daylight.\n"
-            "15. LIGHTING & REFLECTION REPORT (CRITICAL): Despite the compensation in step 14, you MUST describe the lighting and reflections you see. "
-            "For 'lighting_conditions', specify the source and tone (e.g., 'Yellow artificial lighting' or 'Bright natural light'). "
-            "For 'wall_reflections', identify any visible glare or reflection (e.g., 'Major window reflection on the far wall', 'Shiny floor reflection')."
+            "14. LIGHTING COMPENSATION: Photos often have warm yellow/orange lighting that can make White walls look Pink or Orange. Identify the ACTUAL material color as a human would see it in neutral daylight."
         )
         
         # --- Gemini Analysis with Retry Logic ---
@@ -211,16 +239,19 @@ def analyze_arnon_properties():
                 from datetime import datetime, timedelta
                 now_iso = (datetime.utcnow() + timedelta(hours=7)).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
                 
-                # คำนวณ house_color (อันดับ 1) และ house_color2 (อันดับ 2) จาก room_color + element_color
+                # คำนวณ house_color (อันดับ 1) และ house_color2 (อันดับ 2)
+                # 🏠 สูตรใหม่: เน้นสีโครงสร้าง 76% และลดน้ำหนักเฟอร์นิเจอร์เหลือ 24%
                 combined_colors = []
                 for i in range(14):
                     r_val = res.room_color[i] if i < len(res.room_color) else 0
                     e_val = res.element_color[i] if i < len(res.element_color) else 0
-                    combined_colors.append(r_val + e_val)
+                    combined_colors.append((r_val * 0.76) + (e_val * 0.24))
                     
                 sorted_idx = sorted(range(len(combined_colors)), key=lambda k: combined_colors[k], reverse=True)
                 house_color = ENGLISH_COLORS[sorted_idx[0]] if sum(combined_colors) > 0 else "Not Specified"
-                house_color2 = ENGLISH_COLORS[sorted_idx[1]] if sum(combined_colors) > 0 and combined_colors[sorted_idx[1]] > 0 else ""
+                house_color2 = ""
+                if len(sorted_idx) > 1 and combined_colors[sorted_idx[1]] > 0:
+                    house_color2 = ENGLISH_COLORS[sorted_idx[1]]
 
                 # แมป Index ภาพที่เก่า/สกปรก กลับไปเป็น Image ID
                 poor_image_ids = []
@@ -249,13 +280,17 @@ def analyze_arnon_properties():
                 if poor_image_ids:
                     update_payload["poor_condition_image_ids"] = poor_image_ids
 
-                fs.db.collection(TARGET_COLLECTION).document(prop_id).update(update_payload)
+                fs.db.collection(final_collection).document(prop_id).set(update_payload, merge=True)
                 
-                # 🔦 [LOG ONLY] สรุปอารมณ์แสงให้บอสดูทางหน้าจอ
-                print(f"      🔦 [Lighting Mood]: {res.lighting_conditions} | Reflections: {res.wall_reflections}")
+                # ถ้าบันทึกลง collection ใหม่ ต้องปักธง analyzed ใน collection หลักด้วย (ถ้ามี)
+                if final_collection != TARGET_COLLECTION:
+                    fs.db.collection(TARGET_COLLECTION).document(prop_id).update({"analyzed": True, "moved_to_arnon": True})
+                
                 
                 print(f"✅ Property {prop_id} Sync Success!")
                 success = True
+                # Reset กลับเป็น Primary เพื่อเริ่มงานชิ้นใหม่ด้วยสิทธิ์ปกติ (เว้นแต่คุณต้องการให้ค้าง Arnon ไว้)
+                if is_arnon_fallback: api.authenticate(use_arnon=False)
                 time.sleep(2)
                 break # Success! หลุดจาก retry loop
                 

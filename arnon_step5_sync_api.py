@@ -25,10 +25,11 @@ load_dotenv()
 # ==========================================================
 # ⚙️ Run Configuration
 # ==========================================================
+TEST_MODE = True        # 🚩 ตั้งเป็น True เพื่อทดสอบ (ไม่ยิง API จริง)
 UPDATE_EXISTING = True    # 🚩 ตั้งเป็น True เพื่ออัปเดตโครงการที่มีอยู่แล้ว (เช่น อัปเดตค่าส่วนกลาง)
 COLLECTION = "Leads"    
 TARGET_DEVELOPER = "ศุภาลัย" # ปรับตามความต้องการบอสครับ
-PROJECT_LIMIT = None    
+PROJECT_LIMIT = 5       # 🚩 จำกัดจำนวนโครงการที่จะทำในรอบนี้ (เช่น 5 เพื่อทดสอบ)
 API_BASE_URL = os.getenv("AGENT_API_BASE_URL")
 
 # ==========================================================
@@ -141,6 +142,10 @@ def main():
     condo_names = {d.to_dict().get("name_th", ""): d.id for d in fs.db.collection("project_condo").stream()}
     house_names = {d.to_dict().get("name_th", ""): d.id for d in fs.db.collection("project_house").stream()}
 
+    print(f"📊 Total Projects Found: {len(project_groups)}")
+    if TARGET_DEVELOPER:
+        print(f"🎯 Target Developer: {TARGET_DEVELOPER}")
+
     processed_count = 0
     for prj_name, leads_list in project_groups.items():
         if PROJECT_LIMIT and processed_count >= PROJECT_LIMIT: break
@@ -218,6 +223,12 @@ def main():
 
         try:
             print(f"      🚀 {'UPDATING' if is_update else 'CREATING'} -> {api_url}")
+            
+            if TEST_MODE:
+                print(f"      🧪 [TEST MODE] Skipping API Request. Payload: {prj_th} ({prj_en})")
+                processed_count += 1
+                continue
+
             resp = requests.post(api_url, files=form_data, headers=staff_headers, timeout=30)
             if resp.status_code in [200, 201]:
                 print(f"      ✅ Success!")

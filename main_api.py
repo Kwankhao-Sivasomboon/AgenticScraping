@@ -62,6 +62,10 @@ ENGLISH_COLORS = [
     "Green", "Brown", "Red", "Dark Yellow", "Orange", "Purple", "Pink",
     "Light Yellow", "Yellowish Brown", "Light Brown", "White", "Gray", "Blue", "Black"
 ]
+THAI_COLORS = [
+    "เขียว", "น้ำตาล", "แดง", "เหลืองเข้ม", "ส้ม", "ม่วง", "ชมพู",
+    "เหลืองอ่อน", "น้ำตาลอมเหลือง", "น้ำตาลอ่อน", "ขาว", "เทา", "น้ำเงิน", "ดำ"
+]
 
 # ==========================================================
 # Schema  (ตรงกับ arnon_step2_analyze_colors.py)
@@ -79,8 +83,6 @@ class PropertyAnalysisResponse(BaseModel):
     element_room: List[str] = Field(description="List of 14 strings. Each string 'i' contains comma-separated English names of structural elements (wall, door, floor, ceiling) in that color 'i'. If empty, use ''. Max 10 items per color.")
     element_color: List[int] = Field(description="Aggregated 14-color percentage for Furniture in the same order.")
     element_furniture: List[str] = Field(description="List of 14 strings. Each string 'i' contains unique comma-separated furniture names in that color 'i'. If empty, use ''. Max 10 items per color.")
-    lighting_conditions: str = Field(description="Detailed description of lighting in the photos.")
-    wall_reflections: str = Field(description="Detailed description of light reflections on walls or floors.")
 
 # ==========================================================
 # Helpers
@@ -126,33 +128,34 @@ def download_image_as_part(url: str, custom_headers: dict = None, agent_token: s
     return None
 
 
-def try_update_agent_api(property_id: int, payload: dict) -> str:
+def try_update_agent_api(property_id: int, payload: dict, force_arnon: bool = False) -> str:
     """
-    พยายามอัปเดต Agent API และคืนค่า 'primary', 'arnon' หรือ None ตามบัญชีที่สำเร็จ
+    พยายามอัปเดต Agent API โดยเลือกบัญชีที่ถูกต้อง
     """
-    # Primary account
-    api_primary = APIService(
-        email=os.getenv('AGENT_API_EMAIL'),
-        password=os.getenv('AGENT_API_PASSWORD')
-    )
-    if api_primary.authenticate():
-        if api_primary.update_property(str(property_id), payload):
-            logger.info(f"✅ Agent API updated with primary account for {property_id}")
-            return "primary"
-        logger.warning(f"⚠️ Primary account failed to update {property_id}, trying Arnon account...")
-
-    # Fallback to Arnon account
-    arnon_email = os.getenv('AGENT_ARNON_EMAIL')
-    arnon_password = os.getenv('AGENT_ARNON_PASSWORD')
-    if arnon_email and arnon_password:
-        api_arnon = APIService(email=arnon_email, password=arnon_password)
-        if api_arnon.authenticate():
+    if force_arnon:
+        logger.info(f"🎯 Forced Arnon account for property {property_id}")
+        api_arnon = APIService()
+        if api_arnon.authenticate(use_arnon=True):
+            logger.info(f"🔑 Attempting update with ARNON account ({api_arnon.email})...")
             if api_arnon.update_property(str(property_id), payload):
-                logger.info(f"✅ Agent API updated with Arnon account for {property_id}")
                 return "arnon"
+        return ""
 
-    logger.error(f"❌ Agent API update failed for {property_id} (both accounts tried)")
-    return None
+    # ลอง Primary ก่อน
+    api_primary = APIService()
+    api_primary.authenticate()
+    logger.info(f"🔑 Attempting update with PRIMARY account ({api_primary.email})...")
+    if api_primary.update_property(str(property_id), payload):
+        return "primary"
+
+    # ถ้าล้มเหลว ลอง Arnon
+    api_arnon = APIService()
+    if api_arnon.authenticate(use_arnon=True):
+        logger.info(f"🔑 Attempting update with ARNON account ({api_arnon.email})...")
+        if api_arnon.update_property(str(property_id), payload):
+            return "arnon"
+
+    return ""
 
 
 def parse_specs_from_property(prop_data: dict) -> dict:
@@ -210,6 +213,18 @@ def process_property_analysis(property_id: int):
             res_json = r_prop.json()
             prop_data = res_json.get('data', res_json)
 
+            # 🕵️‍♂️ Check Owner: ถ้าเป็นของอานนท์ ให้ใช้บัญชีอานนท์ทำงานตั้งแต่ต้น
+            owner_email = prop_data.get("owner", {}).get("email", "").lower()
+            arnon_email_env = (os.getenv("AGENT_ARNON_EMAIL") or "arnon@painpointtoday.com").lower()
+            
+            if owner_email == arnon_email_env and current_api.email != arnon_email_env:
+                logger.info(f"🎯 Property owner is Arnon ({owner_email}). Switching to Arnon account...")
+                if current_api.authenticate(use_arnon=True):
+                    # ต้องย้อนกลับมาดึงข้อมูลใหม่ด้วย Token ของอานนท์เพื่อให้แน่ใจเรื่องสิทธิ์รูป
+                    return try_fetch_and_download(current_api)
+            
+            is_arnon_owner = (owner_email == arnon_email_env)
+
             # Check property type
             prop_type_name = str(prop_data.get("property_type", {}).get("name", "")).strip()
             is_condo = "condo" in prop_type_name.lower() or "apartment" in prop_type_name.lower()
@@ -248,32 +263,27 @@ def process_property_analysis(property_id: int):
                 if part:
                     image_parts.append(part)
                     original_image_ids.append(img_id_str)
-                else:
-                    # ถ้าโหลดไม่ได้เลยสักรูปเดียว และติด 403 (เช็คใน download_image_as_part logger ถ้าเป็นไปได้)
-                    # ในที่นี้ถ้า image_parts ยังว่างหลังจากลองไปบ้างแล้ว เราอาจจะสงสัยว่าเป็นเพราะสิทธิ์
-                    pass
             
             if not image_parts:
-                return False, "forbidden_images"
+                return False, is_arnon_owner
             
-            return True, "success"
+            return True, is_arnon_owner
         except Exception as e:
             logger.error(f"❌ Error in try_fetch_and_download: {e}")
-            return False, "error"
+            return False, False
 
-    # ลองครั้งแรกด้วยบัญชี Default (Automation)
-    success, reason = try_fetch_and_download(api)
+    # 1. Fetch data & Switch Account if needed
+    success, is_arnon_owner = try_fetch_and_download(api)
     
-    # 🔄 ถ้าติดเรื่องสิทธิ์ ให้สลับไปใช้บัญชี Arnon
-    if not success and reason in ["forbidden", "forbidden_images"]:
-        logger.warning(f"⚠️ Account '{api.email}' got {reason} for Property {property_id}. Swapping to Arnon account...")
+    # 🔄 ถ้าติดเรื่องสิทธิ์ หรือต้องการ Fallback (กรณีที่ fetch รอบแรกเป็น automation แต่โหลดรูปไม่ได้)
+    if not success and not is_arnon_owner:
+        logger.info("⚠️ Primary account fetch/download failed. Attempting manual fallback to Arnon account...")
         if api.authenticate(use_arnon=True):
-            success, reason = try_fetch_and_download(api)
-        else:
-            logger.error("❌ Failed to authenticate with Arnon fallback.")
+            success, is_arnon_owner = try_fetch_and_download(api)
+            is_arnon_owner = True # บังคับเป็น True เพราะเราสลับมาใช้ Arnon แล้ว
     
     if not success:
-        logger.error(f"❌ Could not process Property {property_id}: {reason}")
+        logger.error(f"❌ Failed to fetch or download images for {property_id}")
         return
 
     # 5. Build prompt (ตรงกับ arnon_step2)
@@ -299,10 +309,7 @@ def process_property_analysis(property_id: int):
         "11. STRICTLY EXCLUDE all electrical appliances (AC, washing machines, refrigerators, TVs, microwaves, etc.).\n"
         "12. COHERENCE RULE (CRITICAL): If 'element_furniture[i]' is NOT empty, 'element_color[i]' MUST be > 0. If 'element_color[i]' is 0, 'element_furniture[i]' MUST be ''.\n"
         "13. NO REPETITION & LIMIT: List at most 10 unique items per color string. DO NOT repeat same word. Use plural (e.g., 'chairs').\n"
-        "14. LIGHTING COMPENSATION: Photos often have warm yellow/orange lighting. Identify the ACTUAL material color as a human would see it in neutral daylight.\n"
-        "15. LIGHTING & REFLECTION REPORT (CRITICAL): Despite compensation, you MUST describe the lighting and reflections. "
-        "For 'lighting_conditions', specify source and tone (e.g. 'Yellow artificial light'). "
-        "For 'wall_reflections', identify glare/reflection (e.g. 'Window reflection on wall')."
+        "14. LIGHTING COMPENSATION: Photos often have warm yellow/orange lighting. Identify the ACTUAL material color as a human would see it in neutral daylight."
     )
 
     contents = [prompt] + image_parts
@@ -342,11 +349,11 @@ def process_property_analysis(property_id: int):
     now_iso = (datetime.utcnow() + timedelta(hours=7)).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
 
     # คำนวณ house_color (อันดับ 1) และ house_color2 (อันดับ 2)
-    # ให้น้ำหนักสีของห้อง (room) 70% และสีของเฟอร์นิเจอร์ (element) 30%
+    # ให้น้ำหนักสีของห้อง (room) 76% และสีของเฟอร์นิเจอร์ (element) 24%
     # เพราะโครงสร้างห้อง (พื้น, ผนัง, เพดาน) มีพื้นที่นำสายตาและส่งผลต่อสีหลักมากกว่าเฟอร์นิเจอร์
     combined_colors = [
-        ((res.room_color[i] if i < len(res.room_color) else 0) * 0.7)
-        + ((res.element_color[i] if i < len(res.element_color) else 0) * 0.3)
+        ((res.room_color[i] if i < len(res.room_color) else 0) * 0.76)
+        + ((res.element_color[i] if i < len(res.element_color) else 0) * 0.24)
         for i in range(14)
     ]
     sorted_idx = sorted(range(14), key=lambda k: combined_colors[k], reverse=True)
@@ -360,70 +367,76 @@ def process_property_analysis(property_id: int):
         if 0 <= idx < len(original_image_ids)
     ]
 
-    # 8. Update Agent API First: เพื่อดูว่าสำเร็จที่ Account ไหน จะได้เลือก Collection ใน Firestore ถูก
-    specs_payload = {"style": res.architect_style}
-    if existing_specs.get("floors"):
-        specs_payload["floors"] = existing_specs["floors"]
-    if existing_specs.get("bedrooms"):
-        specs_payload["bedrooms"] = existing_specs["bedrooms"]
-    if existing_specs.get("bathrooms"):
-        specs_payload["bathrooms"] = existing_specs["bathrooms"]
+    # 8. Update Agent API (with fallback to Arnon account)
+    house_color_thai = THAI_COLORS[sorted_idx[0]] if sum(combined_colors) > 0 else "ไม่ระบุ"
+    
+    # 🏠 สำคัญ: house_color ต้องอยู่ข้างใน specifications ถึงจะอัปเดตสำเร็จ
+    specs_payload = {
+        "style": res.architect_style,
+        "house_color": house_color, # English
+        "color": house_color_thai,   # Thai
+    }
+    
+    if existing_specs.get("floors"): specs_payload["floors"] = existing_specs["floors"]
+    if existing_specs.get("bedrooms"): specs_payload["bedrooms"] = existing_specs["bedrooms"]
+    if existing_specs.get("bathrooms"): specs_payload["bathrooms"] = existing_specs["bathrooms"]
 
     agent_update_payload = {
-        "house_color": house_color,
+        "house_color": house_color, # 🚩 ลองส่งไว้นอกสุดตามบอสบอก
+        "color": house_color_thai,   # 🚩 ลองส่งไว้นอกสุดด้วย
         "specifications": specs_payload,
+        "specs": specs_payload,
     }
-
-    used_account = try_update_agent_api(property_id, agent_update_payload)
+    
+    logger.info(f"📤 Updating Agent API for {property_id} with: {house_color}")
+    used_account = try_update_agent_api(property_id, agent_update_payload, force_arnon=is_arnon_owner)
     
     if not used_account:
-        logger.warning(f"⚠️ Skipping Firestore save for {property_id} because Agent API update failed for all accounts.")
-    else:
-        target_collection = "ARNON_properties" if used_account == "arnon" else "Leads"
+        logger.warning(f"⚠️ Agent API update failed for {property_id}. But continuing to Firestore/Staff API...")
+    
+    # 9. Determine Collection
+    target_collection = "ARNON_properties" if used_account == "arnon" else FIRESTORE_COLLECTION
 
-        # 9. Save to Firestore (ใช้ Collection ตาม Account ที่อัปเดตสำเร็จ)
-        raw_color_output = ", ".join([f"{ENGLISH_COLORS[i]}: {int(combined_colors[i])}" for i in range(14) if combined_colors[i] > 0])
+    # 10. Save to Firestore (ใช้ Collection ตาม Account ที่อัปเดตสำเร็จ)
+    raw_color_output = ", ".join([f"{ENGLISH_COLORS[i]}: {int(combined_colors[i])}" for i in range(14) if combined_colors[i] > 0])
+    
+    firestore_payload = {
+        "raw_room_color": res.raw_room_color,
+        "raw_furniture_color": res.raw_furniture_color,
+        "raw_color": raw_color_output,
+        "architect_style": res.architect_style,
+        "room_color": res.room_color,
+        "element_room": res.element_room,
+        "element_color": res.element_color,
+        "element_furniture": res.element_furniture,
+        "house_color": house_color,
+        "house_color2": house_color2,
+        "analyzed": True,
+        "analyzed_at": now_iso,
+        "uploaded": True, # สำเร็จแน่นอนเพราะ used_account ไม่เป็น None
+        "images_analyzed": len(image_parts),
+    }
+    if poor_image_ids:
+        firestore_payload["poor_condition_image_ids"] = poor_image_ids
+
+    try:
+        doc_ref = fs.db.collection(target_collection).document(str(property_id))
         
-        firestore_payload = {
-            "raw_room_color": res.raw_room_color,
-            "raw_furniture_color": res.raw_furniture_color,
-            "raw_color": raw_color_output,
-            "architect_style": res.architect_style,
-            "room_color": res.room_color,
-            "element_room": res.element_room,
-            "element_color": res.element_color,
-            "element_furniture": res.element_furniture,
-            "house_color": house_color,
-            "house_color2": house_color2,
-            "analyzed": True,
-            "analyzed_at": now_iso,
-            "uploaded": True, # สำเร็จแน่นอนเพราะ used_account ไม่เป็น None
-            "images_analyzed": len(image_parts),
-        }
-        if poor_image_ids:
-            firestore_payload["poor_condition_image_ids"] = poor_image_ids
+        # ถ้าเป็น Leads ต้องค้นหาหาเอกสารที่มี api_property_id ตรงกันก่อน
+        if target_collection == "Leads":
+            query = fs.db.collection("Leads").where("api_property_id", "==", int(property_id)).limit(1).get()
+            if query:
+                doc_ref = query[0].reference
+                logger.info(f"🔍 Found existing document in Leads for api_property_id {property_id}")
+            else:
+                logger.warning(f"⚠️ Document with api_property_id {property_id} NOT found in Leads. Creating new with ID {property_id}.")
 
-        # 🔦 [LOG ONLY] โยนคืน Log เพื่อดูอารมณ์ห้องโดยรวม (สีเดียว)
-        logger.info(f"🔦 Property {property_id} Mood: {res.lighting_conditions} | Reflections: {res.wall_reflections}")
+        doc_ref.set(firestore_payload, merge=True)
+        logger.info(f"✅ Firestore updated in '{target_collection}' for {property_id}")
+    except Exception as e:
+        logger.error(f"❌ Firestore update failed for {property_id}: {e}")
 
-        try:
-            doc_ref = fs.db.collection(target_collection).document(str(property_id))
-            
-            # ถ้าเป็น Leads ต้องค้นหาหาเอกสารที่มี api_property_id ตรงกันก่อน
-            if target_collection == "Leads":
-                query = fs.db.collection("Leads").where("api_property_id", "==", int(property_id)).limit(1).get()
-                if query:
-                    doc_ref = query[0].reference
-                    logger.info(f"🔍 Found existing document in Leads for api_property_id {property_id}")
-                else:
-                    logger.warning(f"⚠️ Document with api_property_id {property_id} NOT found in Leads. Creating new with ID {property_id}.")
-
-            doc_ref.set(firestore_payload, merge=True)
-            logger.info(f"✅ Firestore updated in '{target_collection}' for {property_id}")
-        except Exception as e:
-            logger.error(f"❌ Firestore update failed for {property_id}: {e}")
-
-    # 10. Upload to Staff API (color analysis payload - existing flow)
+    # 11. Upload to Staff API (color analysis payload - existing flow)
     try:
         api.authenticate_staff()
         formatted_furniture = []
@@ -437,13 +450,15 @@ def process_property_analysis(property_id: int):
             "property_id": int(property_id),
             "analyzed_at": now_iso,
             "average_color_hex": "#FFFFFF",
-            "color": house_color,
+            "color": house_color_thai,
             "room_color": res.room_color,
             "furniture_color": res.element_color,
             "furniture_elements": formatted_furniture,
             "interior_style": res.architect_style,
             "property_type": "condo" if is_condo else "house",
             "poor_condition_image_ids": poor_image_ids,
+            "house_color": house_color,
+            "house_color2": house_color2,
         }
 
         if api.submit_color_analysis(staff_payload):
@@ -452,22 +467,6 @@ def process_property_analysis(property_id: int):
             logger.error(f"❌ Staff API upload failed for {property_id}")
     except Exception as e:
         logger.error(f"❌ Staff API error for {property_id}: {e}")
-
-    # 10. Update Agent API: house_color + specifications (with fallback to Arnon account)
-    specs_payload = {"style": res.architect_style}
-    if existing_specs.get("floors"):
-        specs_payload["floors"] = existing_specs["floors"]
-    if existing_specs.get("bedrooms"):
-        specs_payload["bedrooms"] = existing_specs["bedrooms"]
-    if existing_specs.get("bathrooms"):
-        specs_payload["bathrooms"] = existing_specs["bathrooms"]
-
-    agent_update_payload = {
-        "house_color": house_color,
-        "specifications": specs_payload,
-    }
-
-    try_update_agent_api(property_id, agent_update_payload)
 
     logger.info(f"🏁 [Task Completed] Property {property_id} fully processed.")
 
