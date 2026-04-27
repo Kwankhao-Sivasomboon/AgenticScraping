@@ -38,7 +38,7 @@ def upload_arnon_analysis():
 
     for coll_name in SOURCE_COLLECTIONS:
         print(f"\n🚀 Scanning collection '{coll_name}' (analyzed=True, uploaded=False)...")
-        docs = fs.db.collection(coll_name).where("analyzed", "==", True).where("uploaded", "==", False).limit(PROJECT_LIMIT).stream()
+        docs = fs.db.collection(coll_name).where("analyzed", "==", True).where("uploaded", "==", False).limit(PROJECT_LIMIT).get()
 
         for doc in docs:
             prop_id = doc.id
