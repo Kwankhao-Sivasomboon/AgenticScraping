@@ -127,17 +127,16 @@ def main():
         
         if not image_parts: continue
 
-        # 3. Analyze with NEW Logic
+        # 3. Analyze with NEW Logic (Spatial Map / Floor Plan Perspective)
         prompt = (
-            "Analyze these images to provide a TRUE area-based color and composition summary. "
-            "Build a mental spatial map of the entire property rooms shown. "
-            "1. 'total_color_composition': Provide a 14-integer array (sum 100) representing the TOTAL area percentage of each color in the entire property (Walls + Floors + Doors + Ceilings + ALL Furniture). "
+            "Build a 3D mental spatial map of this property based on all provided images. "
+            "1. 'total_color_composition': Provide a 14-integer array (sum 100) representing the TRUE PHYSICAL SURFACE AREA percentage for each color across the entire property (including all Walls, Floors, Doors, Ceilings, and Furniture). "
             "Color order: [0:Green, 1:Brown, 2:Red, 3:Dark Yellow, 4:Orange, 5:Purple, 6:Pink, 7:Light Yellow, 8:Yellowish Brown, 9:Light Brown, 10:White, 11:Gray, 12:Blue, 13:Black].\n"
-            "2. 'area_breakdown': Estimate the percentage of total surface area occupied by: 'walls', 'floors', 'doors', 'ceilings', 'furniture'. These MUST sum to exactly 100.\n"
-            "3. 'furniture_details': List each unique furniture item found. For each, estimate its 'area_percentage' relative to the total visible area of all images combined.\n"
+            "2. 'area_breakdown': Estimate the actual physical area percentage covered by: 'walls', 'floors', 'doors', 'ceilings', 'furniture'. These MUST sum to exactly 100% of the property's physical surfaces.\n"
+            "3. 'furniture_details': List EVERY unique furniture element found. For each, estimate its 'area_percentage' relative to the TOTAL physical surface area of the property.\n"
             "4. 'architect_style': Choose ONE: Modern, Nordic, Contemporary, Minimalist, Loft, Luxury, Other.\n"
-            "5. 'raw_room_color' & 'raw_furniture_color': Detailed descriptive strings.\n"
-            "6. LIGHTING COMPENSATION: Identify the ACTUAL material colors as seen in neutral daylight. NO reports on lighting conditions or reflections."
+            "5. 'raw_room_color' & 'raw_furniture_color': Detailed descriptive strings of materials and colors as they exist in the 3D space.\n"
+            "6. COMPENSATE FOR PERSPECTIVE: Do not be fooled by camera angles or distance. Estimate the actual surface area as if you were measuring the room with a tool. NO lighting/reflection reporting."
         )
 
         try:

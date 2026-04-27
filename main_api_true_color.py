@@ -139,14 +139,13 @@ async def process_true_color_analysis(property_id: int):
     
     if not image_parts: return
 
-    # 3. Gemini Analysis (True Color Logic)
+    # 3. Gemini Analysis (True Color Logic - Spatial Map Perspective)
     prompt = (
-        "Analyze these images to provide a TRUE area-based color and composition summary. "
-        "Build a mental spatial map of the entire property rooms shown. "
-        "1. 'total_color_composition': Provide a 14-integer array (sum 100) representing the TOTAL area percentage of each color (Walls + Floors + Doors + Ceilings + ALL Furniture). "
-        "2. 'area_breakdown': Estimate area percentage for: 'walls', 'floors', 'doors', 'ceilings', 'furniture' (sum 100).\n"
-        "3. 'furniture_details': List each furniture item and its 'area_percentage' relative to the total combined area.\n"
-        "4. LIGHTING COMPENSATION: Identify ACTUAL material colors. NO lighting/reflection reports."
+        "Build a 3D mental spatial map of this property based on all provided images. "
+        "1. 'total_color_composition': Provide a 14-integer array (sum 100) representing the TRUE PHYSICAL SURFACE AREA percentage for each color across the entire property (including all Walls, Floors, Doors, Ceilings, and Furniture). "
+        "2. 'area_breakdown': Estimate the actual physical area percentage covered by: 'walls', 'floors', 'doors', 'ceilings', 'furniture'. These MUST sum to exactly 100% of the property's physical surfaces.\n"
+        "3. 'furniture_details': List EVERY unique furniture element found. For each, estimate its 'area_percentage' relative to the TOTAL physical surface area of the property.\n"
+        "4. COMPENSATE FOR PERSPECTIVE: Do not be fooled by camera angles or distance. Estimate the actual surface area as if you were measuring the room with a tool. NO lighting/reflection reporting."
     )
 
     try:
