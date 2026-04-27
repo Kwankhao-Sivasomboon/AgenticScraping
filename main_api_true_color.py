@@ -36,15 +36,28 @@ THAI_COLORS = [
 # --- Schema ---
 class FurnitureItem(BaseModel):
     name: str = Field(description="Name of the furniture item (English)")
-    area_percentage: float = Field(description="Percentage of the TOTAL image area this item occupies.")
+    area_percentage: float = Field(description="Percentage of the TOTAL property surface area this item occupies.")
 
 class PropertyAnalysisTrueColor(BaseModel):
     architect_style: str = Field(description="Architectural or Interior style (Modern, Nordic, etc.)")
+    
+    # 🏠 Room Structure Colors (Sum 100)
+    room_color_composition: List[int] = Field(description="14-color percentage (sum 100) for Walls, Floors, Doors, Ceilings ONLY.")
+    
+    # 🛋️ Furniture Colors (Sum 100)
+    furniture_color_composition: List[int] = Field(description="14-color percentage (sum 100) for Furniture ONLY.")
+    
+    # 🎨 Furniture Elements Mapping
+    furniture_elements: Dict[str, List[str]] = Field(description="Mapping of 14 English colors to lists of furniture names in that color.")
+    
+    # Element Area Breakdown (Sum to 100)
+    area_breakdown: Dict[str, float] = Field(description="Actual physical area % for: walls, floors, doors, ceilings, furniture. (SUM MUST BE 100)")
+    
+    # Detailed Furniture Breakdown
+    furniture_details: List[FurnitureItem] = Field(description="List of every unique furniture item found and its area percentage relative to the TOTAL physical surface area.")
+    
     raw_room_color: str = Field(description="Raw description of colors for Walls, Doors, Floors, Ceilings.")
-    raw_furniture_color: str = Field(description="Raw description of colors for each unique furniture item.")
-    total_color_composition: List[int] = Field(description="Aggregated 14-color percentage (sum 100) including EVERYTHING.")
-    area_breakdown: Dict[str, float] = Field(description="Percentage of area occupied by: walls, floors, doors, ceilings, furniture.")
-    furniture_details: List[FurnitureItem] = Field(description="List of each unique furniture item and its area percentage.")
+    raw_furniture_color: str = Field(description="Raw description of colors for furniture items.")
     poor_condition_image_indices: List[int] = Field(description="Indices of images showing severe damage.")
 
 # --- Helpers ---
@@ -139,13 +152,15 @@ async def process_true_color_analysis(property_id: int):
     
     if not image_parts: return
 
-    # 3. Gemini Analysis (True Color Logic - Spatial Map Perspective)
+    # 3. Gemini Analysis (True Color Logic - 100/100 Spatial Map)
     prompt = (
         "Build a 3D mental spatial map of this property based on all provided images. "
-        "1. 'total_color_composition': Provide a 14-integer array (sum 100) representing the TRUE PHYSICAL SURFACE AREA percentage for each color across the entire property (including all Walls, Floors, Doors, Ceilings, and Furniture). "
-        "2. 'area_breakdown': Estimate the actual physical area percentage covered by: 'walls', 'floors', 'doors', 'ceilings', 'furniture'. These MUST sum to exactly 100% of the property's physical surfaces.\n"
-        "3. 'furniture_details': List EVERY unique furniture element found. For each, estimate its 'area_percentage' relative to the TOTAL physical surface area of the property.\n"
-        "4. COMPENSATE FOR PERSPECTIVE: Do not be fooled by camera angles or distance. Estimate the actual surface area as if you were measuring the room with a tool. NO lighting/reflection reporting."
+        "1. 'room_color_composition': Provide a 14-integer array (sum 100) for Walls, Floors, Doors, and Ceilings ONLY. "
+        "2. 'furniture_color_composition': Provide a 14-integer array (sum 100) for Furniture ONLY. "
+        "3. 'furniture_elements': A dictionary mapping the 14 English colors (e.g., 'White', 'Gray') to lists of unique furniture names in that color. "
+        "4. 'area_breakdown': Estimate the physical area percentage for: 'walls', 'floors', 'doors', 'ceilings', 'furniture'. SUM MUST BE 100.\n"
+        "5. 'furniture_details': List unique furniture items and their area % relative to the TOTAL physical surface area of the property.\n"
+        "6. COMPENSATE FOR PERSPECTIVE: Identify TRUE material colors as if measuring the room. NO lighting/reflection reporting."
     )
 
     try:
@@ -159,8 +174,17 @@ async def process_true_color_analysis(property_id: int):
         )
         res = response.parsed
         
-        # Calculate dominant color
-        max_idx = res.total_color_composition.index(max(res.total_color_composition))
+        # Calculate overall dominant color based on Spatial Weights
+        room_weight = (res.area_breakdown.get('walls', 0) + res.area_breakdown.get('floors', 0) + 
+                       res.area_breakdown.get('doors', 0) + res.area_breakdown.get('ceilings', 0)) / 100
+        furn_weight = res.area_breakdown.get('furniture', 0) / 100
+        
+        combined_composition = []
+        for i in range(14):
+            val = (res.room_color_composition[i] * room_weight) + (res.furniture_color_composition[i] * furn_weight)
+            combined_composition.append(val)
+            
+        max_idx = combined_composition.index(max(combined_composition))
         house_color = ENGLISH_COLORS[max_idx]
         house_color_thai = THAI_COLORS[max_idx]
 
