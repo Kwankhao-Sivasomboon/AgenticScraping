@@ -67,6 +67,31 @@ THAI_COLORS = [
     "เหลืองอ่อน", "น้ำตาลอมเหลือง", "น้ำตาลอ่อน", "ขาว", "เทา", "น้ำเงิน", "ดำ"
 ]
 
+# System Base Colors (14)
+SYSTEM_COLOR_MAP = {
+    "Green": "Green",
+    "Brown": "Brown",
+    "Red": "Red",
+    "Dark Yellow": "Yellow",
+    "Orange": "Orange",
+    "Purple": "Pink",
+    "Pink": "Pink",
+    "Light Yellow": "Cream",
+    "Yellowish Brown": "Cream",
+    "Light Brown": "Cream",
+    "White": "White",
+    "Gray": "Gray",
+    "Blue": "Blue",
+    "Black": "Black"
+}
+
+SYSTEM_THAI_MAP = {
+    "Black": "ดำ", "Blue": "น้ำเงิน", "Brown": "น้ำตาล", "Cream": "ครีม",
+    "Gold": "ทอง", "Gray": "เทา", "Green": "เขียว", "Light Gray": "เทาอ่อน",
+    "Orange": "ส้ม", "Pink": "ชมพู", "Red": "แดง", "Silver": "เงิน",
+    "White": "ขาว", "Yellow": "เหลือง"
+}
+
 # ==========================================================
 # Schema  (ตรงกับ arnon_step2_analyze_colors.py)
 # ==========================================================
@@ -87,8 +112,20 @@ class PropertyAnalysisResponse(BaseModel):
 # ==========================================================
 # Helpers
 # ==========================================================
-def download_image_as_part(url: str, custom_headers: dict = None, agent_token: str = None):
-    """Download and compress image as Gemini Part. ใส่ Bearer token ด้วยเพราะ app.yourhome.co.th media URLs ต้องใช้ auth"""
+def download_image_as_part(url: str, custom_headers: dict = None, agent_token: str = None, base_url: str = None):
+    """Download and compress image as Gemini Part."""
+    if not url: return None
+    original_url = url
+    
+    # Handle relative URLs (e.g. 'staging/image.jpg')
+    if not url.startswith(('http://', 'https://')):
+        if base_url:
+            clean_base = base_url.rstrip('/')
+            if clean_base.endswith('/api'): clean_base = clean_base[:-4]
+            url = f"{clean_base}/{url.lstrip('/')}"
+        else:
+            return None
+            
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
@@ -115,45 +152,55 @@ def download_image_as_part(url: str, custom_headers: dict = None, agent_token: s
         r = requests.get(url, headers=headers, timeout=20)
         if r.status_code == 200:
             img = Image.open(BytesIO(r.content))
-            if img.mode != 'RGB':
-                img = img.convert('RGB')
+            if img.mode != 'RGB': img = img.convert('RGB')
             img.thumbnail((512, 512))
             buffer = BytesIO()
-            img.save(buffer, format="JPEG", quality=80)
-            return types.Part.from_bytes(data=buffer.getvalue(), mime_type='image/jpeg')
+            img.save(buffer, format="WEBP", quality=80)
+            return types.Part.from_bytes(data=buffer.getvalue(), mime_type='image/webp')
+        elif r.status_code == 404 and "/storage/" not in url and base_url:
+            # ลองเติม /storage/ เข้าไปถ้า API คืนค่าเป็น Path ลอยๆ
+            clean_base = base_url.rstrip('/')
+            if clean_base.endswith('/api'): clean_base = clean_base[:-4]
+            fallback_img_url = f"{clean_base}/storage/{original_url.lstrip('/')}"
+            logger.info(f"🔄 Retrying with storage path: {fallback_img_url}")
+            r2 = requests.get(fallback_img_url, headers=headers, timeout=15)
+            if r2.status_code == 200:
+                img = Image.open(BytesIO(r2.content))
+                if img.mode != 'RGB': img = img.convert('RGB')
+                img.thumbnail((512, 512))
+                buffer = BytesIO()
+                img.save(buffer, format="WEBP", quality=80)
+                return types.Part.from_bytes(data=buffer.getvalue(), mime_type='image/webp')
+            else:
+                logger.warning(f"[!] Download failed: Status {r2.status_code} for URL: {fallback_img_url}")
         else:
-            logger.warning(f"[!] Download failed: Status {r.status_code} for URL (Referer: {headers.get('Referer')})")
+            logger.warning(f"[!] Download failed: Status {r.status_code} for URL: {url}")
     except Exception as e:
-        logger.warning(f"[!] Download error: {e}")
+        logger.warning(f"[!] Download error for {url}: {e}")
     return None
 
 
-def try_update_agent_api(property_id: int, payload: dict, force_arnon: bool = False) -> str:
-    """
-    พยายามอัปเดต Agent API โดยเลือกบัญชีที่ถูกต้อง
-    """
+def try_update_agent_api(current_api: APIService, property_id: int, payload: dict, force_arnon: bool = False) -> str:
+    """พยายามอัปเดต Agent API โดยเลือกบัญชีที่ถูกต้อง"""
     if force_arnon:
         logger.info(f"🎯 Forced Arnon account for property {property_id}")
-        api_arnon = APIService()
-        if api_arnon.authenticate(use_arnon=True):
-            logger.info(f"🔑 Attempting update with ARNON account ({api_arnon.email})...")
-            if api_arnon.update_property(str(property_id), payload):
-                return "arnon"
+        if current_api.email != os.getenv("AGENT_ARNON_EMAIL"):
+            current_api.authenticate(use_arnon=True)
+        if current_api.update_property(str(property_id), payload):
+            return "arnon"
         return ""
 
-    # ลอง Primary ก่อน
-    api_primary = APIService()
-    api_primary.authenticate()
-    logger.info(f"🔑 Attempting update with PRIMARY account ({api_primary.email})...")
-    if api_primary.update_property(str(property_id), payload):
-        return "primary"
+    # ลองใช้บัญชีปัจจุบันที่มีอยู่ก่อน
+    logger.info(f"🔑 Attempting update with CURRENT account ({current_api.email})...")
+    if current_api.update_property(str(property_id), payload):
+        return "primary" if current_api.email != os.getenv("AGENT_ARNON_EMAIL") else "arnon"
 
-    # ถ้าล้มเหลว ลอง Arnon
-    api_arnon = APIService()
-    if api_arnon.authenticate(use_arnon=True):
-        logger.info(f"🔑 Attempting update with ARNON account ({api_arnon.email})...")
-        if api_arnon.update_property(str(property_id), payload):
-            return "arnon"
+    # ถ้าล้มเหลว และยังไม่ใช่ Arnon ให้ลองสลับเป็น Arnon
+    if current_api.email != os.getenv("AGENT_ARNON_EMAIL"):
+        logger.info(f"🔄 Update failed with Primary. Switching to ARNON for retry...")
+        if current_api.authenticate(use_arnon=True):
+            if current_api.update_property(str(property_id), payload):
+                return "arnon"
 
     return ""
 
@@ -184,7 +231,9 @@ def process_property_analysis(property_id: int):
 
     client = genai.Client(api_key=api_key)
     api = APIService()
-    api.authenticate()
+    if not api.authenticate():
+        logger.error("❌ Initial Agent API authentication failed on both Primary and Fallback URLs. Terminating task.")
+        return
     fs = FirestoreService()
 
     # 2. Fetch Property Detail & Download Images (with Dynamic Fallback)
@@ -198,20 +247,13 @@ def process_property_analysis(property_id: int):
     def try_fetch_and_download(current_api):
         nonlocal prop_data, image_parts, original_image_ids, is_condo, prop_type_name, existing_specs
         try:
-            base = current_api.base_url.rstrip('/')
-            url_prop = f"{base}/api/agent/properties/{property_id}/status"
-            headers_prop = current_api._get_auth_headers()
-
-            logger.info(f"   🌐 Fetching Detail: {url_prop}")
-            r_prop = requests.get(url_prop, headers=headers_prop, timeout=15)
+            prop_data = current_api.get_property_detail(property_id)
             
-            # 🛑 ถ้าติด 403 หรือ 401 แสดงว่าบัญชีนี้ไม่มีสิทธิ์
-            if r_prop.status_code in [403, 401]:
+            if prop_data == "forbidden":
                 return False, "forbidden"
-
-            r_prop.raise_for_status()
-            res_json = r_prop.json()
-            prop_data = res_json.get('data', res_json)
+            
+            if not prop_data:
+                return False, False
 
             # 🕵️‍♂️ Check Owner: ถ้าเป็นของอานนท์ ให้ใช้บัญชีอานนท์ทำงานตั้งแต่ต้น
             owner_email = prop_data.get("owner", {}).get("email", "").lower()
@@ -243,26 +285,38 @@ def process_property_analysis(property_id: int):
             # Refresh photo URLs
             url_map = {}
             refreshed = current_api.refresh_photo_urls(img_ids)
-            if refreshed and isinstance(refreshed, dict):
-                items = refreshed.get("refreshed_images") or refreshed.get("data", {}).get("refreshed_images", [])
-                for item in items:
+            if refreshed:
+                for item in refreshed:
                     url_map[str(item.get("id"))] = item.get("url")
-
+            
             # Download images
             image_parts = []
             original_image_ids = []
-            api_domain = current_api.base_url.split("//")[-1].split("/")[0]
+            api_domain = current_api.primary_url.split("//")[-1].split("/")[0] # Use primary_url for Referer
             download_headers = {"Referer": f"https://{api_domain}/", "Accept": "image/webp,image/apng,image/*,*/*;q=0.8"}
 
             for img_meta in gallery_images[:15]:
                 img_id_str = str(img_meta.get("id"))
-                img_url = url_map.get(img_id_str) or img_meta.get("url")
-                part = download_image_as_part(img_url, custom_headers=download_headers, agent_token=current_api.token)
+                # 🚀 ลำดับความสำคัญ: refreshed > validated > raw
+                img_url = url_map.get(img_id_str) or img_meta.get("validated_url") or img_meta.get("url")
                 
-                # ถ้าโหลดรูปแล้วติด 403 แสดงว่า Token บัญชีนี้อาจจะเข้าถึง Media ไม่ได้
+                if not img_url: continue
+                
+                # 🛠️ ซ่อม URL ถ้าไม่มี Domain
+                if not img_url.startswith('http'):
+                    base = current_api.primary_url.rstrip('/')
+                    if '/api' in base: base = base.split('/api')[0]
+                    img_url = f"{base}/{img_url.lstrip('/')}"
+
+                # 📸 Download
+                part = download_image_as_part(img_url, custom_headers=download_headers, agent_token=current_api.token, base_url=current_api.base_url)
+                
                 if part:
                     image_parts.append(part)
                     original_image_ids.append(img_id_str)
+                
+                # ⏳ หน่วงเวลาเล็กน้อย (0.5s)
+                time.sleep(0.5)
             
             if not image_parts:
                 return False, is_arnon_owner
@@ -309,7 +363,9 @@ def process_property_analysis(property_id: int):
         "11. STRICTLY EXCLUDE all electrical appliances (AC, washing machines, refrigerators, TVs, microwaves, etc.).\n"
         "12. COHERENCE RULE (CRITICAL): If 'element_furniture[i]' is NOT empty, 'element_color[i]' MUST be > 0. If 'element_color[i]' is 0, 'element_furniture[i]' MUST be ''.\n"
         "13. NO REPETITION & LIMIT: List at most 10 unique items per color string. DO NOT repeat same word. Use plural (e.g., 'chairs').\n"
-        "14. LIGHTING COMPENSATION: Photos often have warm yellow/orange lighting. Identify the ACTUAL material color as a human would see it in neutral daylight."
+        "14. LIGHTING COMPENSATION: Photos often have warm yellow/orange lighting. Identify the ACTUAL material color as a human would see it in neutral daylight.\n"
+        "15. STRICTLY EXCLUDE nature, trees, plants, grass, and garden elements. Focus ONLY on the Building Facade and Man-made materials.\n"
+        "16. TONE PRIORITY: If a color is ambiguous between a warm tone (Cream, Beige, Light Brown) and a cool tone (Gray, White), PRIORITIZE the warm tone."
     )
 
     contents = [prompt] + image_parts
@@ -320,8 +376,10 @@ def process_property_analysis(property_id: int):
     for attempt in range(3):
         try:
             time.sleep(3)
+            # ใช้ gemini-2.5-flash เป็นตัวหลัก
+            current_model = "gemini-2.5-flash" if attempt < 2 else "gemini-3.1-flash-lite-preview"
             response = client.models.generate_content(
-                model='gemini-3-flash-preview',
+                model=current_model,
                 contents=contents,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
@@ -349,16 +407,26 @@ def process_property_analysis(property_id: int):
     now_iso = (datetime.utcnow() + timedelta(hours=7)).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
 
     # คำนวณ house_color (อันดับ 1) และ house_color2 (อันดับ 2)
-    # ให้น้ำหนักสีของห้อง (room) 76% และสีของเฟอร์นิเจอร์ (element) 24%
-    # เพราะโครงสร้างห้อง (พื้น, ผนัง, เพดาน) มีพื้นที่นำสายตาและส่งผลต่อสีหลักมากกว่าเฟอร์นิเจอร์
+    # ให้น้ำหนักสีของห้อง (room) 50% และสีของเฟอร์นิเจอร์ (element) 50%
     combined_colors = [
-        ((res.room_color[i] if i < len(res.room_color) else 0) * 0.76)
-        + ((res.element_color[i] if i < len(res.element_color) else 0) * 0.24)
+        ((res.room_color[i] if i < len(res.room_color) else 0) * 0.5)
+        + ((res.element_color[i] if i < len(res.element_color) else 0) * 0.5)
         for i in range(14)
     ]
-    sorted_idx = sorted(range(14), key=lambda k: combined_colors[k], reverse=True)
-    house_color = ENGLISH_COLORS[sorted_idx[0]] if sum(combined_colors) > 0 else "Not Specified"
-    house_color2 = ENGLISH_COLORS[sorted_idx[1]] if sum(combined_colors) > 0 and combined_colors[sorted_idx[1]] > 0 else ""
+    
+    # Aggregate into System Colors
+    system_scores = {c: 0.0 for c in set(SYSTEM_COLOR_MAP.values())}
+    for i in range(14):
+        ai_color = ENGLISH_COLORS[i]
+        sys_color = SYSTEM_COLOR_MAP[ai_color]
+        system_scores[sys_color] += combined_colors[i]
+        
+    sorted_sys_colors = sorted(system_scores.items(), key=lambda x: x[1], reverse=True)
+    house_color = sorted_sys_colors[0][0] if sorted_sys_colors[0][1] > 0 else "Not Specified"
+    house_color_thai = SYSTEM_THAI_MAP.get(house_color, "ไม่ระบุ")
+    
+    house_color2 = sorted_sys_colors[1][0] if len(sorted_sys_colors) > 1 and sorted_sys_colors[1][1] > 0 else None
+    house_color2_thai = SYSTEM_THAI_MAP.get(house_color2) if house_color2 else None
 
     # แมป poor condition image IDs
     poor_image_ids = [
@@ -368,13 +436,14 @@ def process_property_analysis(property_id: int):
     ]
 
     # 8. Update Agent API (with fallback to Arnon account)
-    house_color_thai = THAI_COLORS[sorted_idx[0]] if sum(combined_colors) > 0 else "ไม่ระบุ"
     
     # 🏠 สำคัญ: house_color ต้องอยู่ข้างใน specifications ถึงจะอัปเดตสำเร็จ
     specs_payload = {
         "style": res.architect_style,
         "house_color": house_color, # English
         "color": house_color_thai,   # Thai
+        "house_color2": house_color2,
+        "color2": house_color2_thai,
     }
     
     if existing_specs.get("floors"): specs_payload["floors"] = existing_specs["floors"]
@@ -382,17 +451,24 @@ def process_property_analysis(property_id: int):
     if existing_specs.get("bathrooms"): specs_payload["bathrooms"] = existing_specs["bathrooms"]
 
     agent_update_payload = {
-        "house_color": house_color, # 🚩 ลองส่งไว้นอกสุดตามบอสบอก
-        "color": house_color_thai,   # 🚩 ลองส่งไว้นอกสุดด้วย
+        "house_color": house_color, 
+        "color": house_color_thai,   
+        "house_color2": house_color2,
+        "color2": house_color2_thai,
         "specifications": specs_payload,
         "specs": specs_payload,
     }
     
     logger.info(f"📤 Updating Agent API for {property_id} with: {house_color}")
-    used_account = try_update_agent_api(property_id, agent_update_payload, force_arnon=is_arnon_owner)
+    used_account = try_update_agent_api(api, property_id, agent_update_payload, force_arnon=is_arnon_owner)
     
     if not used_account:
-        logger.warning(f"⚠️ Agent API update failed for {property_id}. But continuing to Firestore/Staff API...")
+        logger.warning(f"⚠️ Agent API update failed for {property_id}. But continuing...")
+    
+    # [ADDED] 8.5 Upload Color Breakdown to STAFF API
+    if structural_colors or furniture_elements:
+        logger.info(f"📤 Uploading detailed colors to Staff API for {property_id}...")
+        api.submit_color_analysis(property_id, structural_colors, furniture_elements)
     
     # 9. Determine Collection
     target_collection = "ARNON_properties" if used_account == "arnon" else FIRESTORE_COLLECTION

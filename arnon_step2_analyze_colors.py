@@ -24,6 +24,31 @@ ENGLISH_COLORS = [
     "Light Yellow", "Yellowish Brown", "Light Brown", "White", "Gray", "Blue", "Black"
 ]
 
+# System Base Colors (14)
+SYSTEM_COLOR_MAP = {
+    "Green": "Green",
+    "Brown": "Brown",
+    "Red": "Red",
+    "Dark Yellow": "Yellow",
+    "Orange": "Orange",
+    "Purple": "Pink",
+    "Pink": "Pink",
+    "Light Yellow": "Cream",
+    "Yellowish Brown": "Cream",
+    "Light Brown": "Cream",
+    "White": "White",
+    "Gray": "Gray",
+    "Blue": "Blue",
+    "Black": "Black"
+}
+
+SYSTEM_THAI_MAP = {
+    "Black": "ดำ", "Blue": "น้ำเงิน", "Brown": "น้ำตาล", "Cream": "ครีม",
+    "Gold": "ทอง", "Gray": "เทา", "Green": "เขียว", "Light Gray": "เทาอ่อน",
+    "Orange": "ส้ม", "Pink": "ชมพู", "Red": "แดง", "Silver": "เงิน",
+    "White": "ขาว", "Yellow": "เหลือง"
+}
+
 class PropertyAnalysis(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra='ignore')
     architect_style: str = Field(description="Strictly ONE of: Modern, Nordic, Contemporary, Minimalist, Loft, Luxury, Other.")
@@ -36,24 +61,43 @@ class PropertyAnalysis(BaseModel):
     element_color: List[int] = Field(description="Aggregated 14-color percentage for Furniture in the same order.")
     element_furniture: List[str] = Field(description="List of 14 strings. Each string 'i' contains unique comma-separated furniture names in that color 'i'. If empty, use \"\". Max 10 items per color.")
 
-def download_image_as_part(url: str, agent_token: str = None):
+def download_image_as_part(url: str, agent_token: str = None, base_url: str = None):
+    if not url: return None, None
+    original_url = url
     headers = {"User-Agent": "Mozilla/5.0"}
-    if agent_token:
-        headers["Authorization"] = f"Bearer {agent_token}"
+    if agent_token: headers["Authorization"] = f"Bearer {agent_token}"
+    
+    # Handle relative URLs
+    if not url.startswith(('http://', 'https://')):
+        if base_url:
+            clean_base = base_url.rstrip('/')
+            if clean_base.endswith('/api'): clean_base = clean_base[:-4]
+            url = f"{clean_base}/{url.lstrip('/')}"
+        else: return None, None
+
     try:
         r = requests.get(url, headers=headers, timeout=15)
         if r.status_code == 200:
             img = Image.open(BytesIO(r.content))
-            if img.mode != 'RGB':
-                img = img.convert('RGB')
+            if img.mode != 'RGB': img = img.convert('RGB')
             img.thumbnail((512, 512))
             buffer = BytesIO()
             img.save(buffer, format="JPEG", quality=80) 
             return types.Part.from_bytes(data=buffer.getvalue(), mime_type='image/jpeg'), 200
-        elif r.status_code == 403:
-            return None, 403
-        else:
-            return None, r.status_code
+        elif r.status_code == 404 and "/storage/" not in url and base_url:
+            # Retry with /storage/
+            clean_base = base_url.rstrip('/')
+            if clean_base.endswith('/api'): clean_base = clean_base[:-4]
+            fallback_url = f"{clean_base}/storage/{original_url.lstrip('/')}"
+            r2 = requests.get(fallback_url, headers=headers, timeout=15)
+            if r2.status_code == 200:
+                img = Image.open(BytesIO(r2.content))
+                if img.mode != 'RGB': img = img.convert('RGB')
+                img.thumbnail((512, 512))
+                buffer = BytesIO()
+                img.save(buffer, format="JPEG", quality=80)
+                return types.Part.from_bytes(data=buffer.getvalue(), mime_type='image/jpeg'), 200
+        return None, r.status_code
     except Exception as e:
         return None, 999
 
@@ -95,6 +139,22 @@ def analyze_arnon_properties():
     for doc in tasks:
         prop_id = doc.id
         data = doc.to_dict()
+        fetch_email = data.get("fetch_email")
+        
+        # 🚩 เช็คและสลับบัญชีให้ตรงกับ fetch_email
+        if fetch_email and api.email != fetch_email:
+            print(f"🔄 Switching account: {api.email} -> {fetch_email}")
+            use_arnon = (fetch_email == os.getenv("AGENT_ARNON_EMAIL"))
+            if not api.authenticate(use_arnon=use_arnon):
+                print(f"❌ Failed to switch to {fetch_email}. Skipping...")
+                continue
+        
+        # เช็คว่าเคยรันไปหรือยัง
+        if data.get("analyzed") is True:
+            print(f"⏭️ Skip {prop_id}: Already analyzed")
+            continue
+
+        print(f"\n🏠 Processing Property: {prop_id} (Account: {api.email})")
         images_info = data.get("images", [])
         
         if not images_info:
@@ -165,15 +225,15 @@ def analyze_arnon_properties():
         original_image_ids = []
         
         for img_meta in gallery_images[:15]:
-            img_url = url_map.get(str(img_meta.get("id"))) or img_meta.get("url")
-            part, status = download_image_as_part(img_url, agent_token=api.token)
+            img_url = url_map.get(str(img_meta.get("id"))) or img_meta.get("validated_url") or img_meta.get("url")
+            part, status = download_image_as_part(img_url, agent_token=api.token, base_url=api.base_url)
             
             # Fallback เผื่อเจอ 403 แบบไม่คาดคิด (กรณีอื่นๆ)
             if status == 403 and not is_arnon_fallback:
                 print(f"      ⚠️ Unexpected 403. Attempting fallback to Arnon account...")
                 if api.authenticate(use_arnon=True):
                     is_arnon_fallback = True
-                    part, status = download_image_as_part(img_url, agent_token=api.token)
+                    part, status = download_image_as_part(img_url, agent_token=api.token, base_url=api.base_url)
 
             if part:
                 image_parts.append(part)
@@ -211,7 +271,9 @@ def analyze_arnon_properties():
             "11. STRICTLY EXCLUDE all electrical appliances (AC, washing machines, refrigerators, TVs, microwaves, etc.).\n"
             "12. COHERENCE RULE (CRITICAL): If 'element_furniture[i]' is NOT empty, 'element_color[i]' MUST be > 0. If 'element_color[i]' is 0, 'element_furniture[i]' MUST be \"\".\n"
             "13. NO REPETITION & LIMIT: List at most 10 unique items per color string. DO NOT repeat the same word. Use plural (e.g., 'chairs') instead of repeating same text.\n"
-            "14. LIGHTING COMPENSATION: Photos often have warm yellow/orange lighting that can make White walls look Pink or Orange. Identify the ACTUAL material color as a human would see it in neutral daylight."
+            "14. LIGHTING COMPENSATION: Photos often have warm yellow/orange lighting that can make White walls look Pink or Orange. Identify the ACTUAL material color as a human would see it in neutral daylight.\n"
+            "15. STRICTLY EXCLUDE nature, trees, plants, grass, and garden elements. Focus ONLY on the Building Facade and Man-made materials.\n"
+            "16. TONE PRIORITY: If a color is ambiguous between a warm tone (Cream, Beige, Light Brown) and a cool tone (Gray, White), PRIORITIZE the warm tone."
         )
         
         # --- Gemini Analysis with Retry Logic ---
@@ -225,8 +287,10 @@ def analyze_arnon_properties():
 
                 # ส่งรูป (ที่บีบอัดแล้ว) ยกชุดให้ AI 
                 contents = [prompt] + image_parts
+                # ใช้ gemini-2.5-flash เป็นตัวหลัก
+                current_model = "gemini-2.5-flash" if attempt < 2 else "gemini-3.1-flash-lite-preview"
                 response = client.models.generate_content(
-                    model=model_name,
+                    model=current_model,
                     contents=contents,
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
@@ -247,11 +311,16 @@ def analyze_arnon_properties():
                     e_val = res.element_color[i] if i < len(res.element_color) else 0
                     combined_colors.append((r_val * 0.76) + (e_val * 0.24))
                     
-                sorted_idx = sorted(range(len(combined_colors)), key=lambda k: combined_colors[k], reverse=True)
-                house_color = ENGLISH_COLORS[sorted_idx[0]] if sum(combined_colors) > 0 else "Not Specified"
-                house_color2 = ""
-                if len(sorted_idx) > 1 and combined_colors[sorted_idx[1]] > 0:
-                    house_color2 = ENGLISH_COLORS[sorted_idx[1]]
+                # Aggregate into System Colors
+                system_scores = {c: 0.0 for c in set(SYSTEM_COLOR_MAP.values())}
+                for i in range(14):
+                    ai_color = ENGLISH_COLORS[i]
+                    sys_color = SYSTEM_COLOR_MAP[ai_color]
+                    system_scores[sys_color] += combined_colors[i]
+                
+                sorted_sys_colors = sorted(system_scores.items(), key=lambda x: x[1], reverse=True)
+                house_color = sorted_sys_colors[0][0] if sorted_sys_colors[0][1] > 0 else "Not Specified"
+                house_color2 = sorted_sys_colors[1][0] if len(sorted_sys_colors) > 1 and sorted_sys_colors[1][1] > 0 else ""
 
                 # แมป Index ภาพที่เก่า/สกปรก กลับไปเป็น Image ID
                 poor_image_ids = []

@@ -8,105 +8,103 @@ from src.services.api_service import APIService
 
 load_dotenv()
 
-BASE_URL = os.getenv('AGENT_API_BASE_URL', 'http://localhost/api')
+TARGET_COLLECTION = "area_color"
 
-def fetch_arnon_properties_list():
-    # 🚀 ปล่อยให้ APIService เลือก Email/Password จาก .env เองตามลำดับความสำคัญ
-    api = APIService()
-    if not api.authenticate():
-        print("❌ Login failed.")
-        return
-
-    fs = FirestoreService()
+def fetch_and_save_properties(api: APIService, fs: FirestoreService, account_name: str):
     page = 1
     total_approved = 0
     total_images = 0
-
-    print("🚀 เริ่มดึงข้อมูลจาก Agent API (ดึงทีละหน้า) เพื่อคัดกรองเฉพาะ 'Approved'...")
+    
+    email = api.email
+    print(f"\n🚀 เริ่มดึงข้อมูลบัญชี: {account_name} ({email})")
     
     while True:
         headers = api._get_auth_headers()
-        base = BASE_URL.replace('/api', '').rstrip('/')
+        base = api.base_url.replace('/api', '').rstrip('/')
         url = f"{base}/api/agent/properties?page={page}"
         
-        print(f"\n📄 กำลังดึงข้อมูล Page {page}...")
-        res = requests.get(url, headers=headers, timeout=20)
-        
-        if res.status_code != 200:
-            print(f"⚠️ Error: Received status code {res.status_code} at page {page}: {res.text}")
-            break
-            
-        data = res.json()
-        properties = []
-        
-        # ลอจิกเจาะข้อมูล (API ส่งกลับมาเป็น data -> properties หรือ list ตรงๆ)
-        if isinstance(data, dict) and "data" in data:
-            d1 = data["data"]
-            if isinstance(d1, dict) and "properties" in d1:
-                properties = d1["properties"]
-            elif isinstance(d1, list):
-                properties = d1
-        
-        if not properties:
-            print(f"🏁 สิ้นสุดการค้นหา ไม่พบข้อมูลในหน้า {page} แล้ว")
-            break
-            
-        batch = fs.db.batch()
-        batch_operations_count = 0
-        
-        for prop in properties:
-            prop_id = str(prop.get("id"))
-            
-            # 1. เช็ค Status 
-            status_str = str(prop.get("approval_status") or "").lower()
-            if "approve" not in status_str:
-                continue
+        print(f"📄 Page {page}...")
+        try:
+            res = requests.get(url, headers=headers, timeout=20)
+            if res.status_code != 200:
+                print(f"⚠️ Error {res.status_code} at page {page}")
+                break
                 
-            # 2. เช็ครูปภาพ (ต้องไม่ใช่ Common facilities)
-            images = prop.get("images", [])
-            target_images = [img for img in images if img.get("tag") != "Common facilities"]
+            data = res.json()
+            properties = []
+            if isinstance(data, dict) and "data" in data:
+                d1 = data["data"]
+                if isinstance(d1, dict) and "properties" in d1:
+                    properties = d1["properties"]
+                elif isinstance(d1, list):
+                    properties = d1
             
-            if not target_images:
-                continue
+            if not properties:
+                print(f"🏁 สิ้นสุดข้อมูลที่หน้า {page-1}")
+                break
                 
-            print(f"   ✅ [Approved] ID: {prop_id} | รูปเป้าหมาย: {len(target_images)} รูป")
+            batch = fs.db.batch()
+            batch_count = 0
             
-            # 3. ตามล่าหา Lead เดิมใน Firestore เพื่อปักธง launch_approved
-            listing_id = None
-            leads_docs = fs.db.collection(fs.collection_name).where(
-                filter=FieldFilter("api_property_id", "==", prop_id)
-            ).limit(1).get()
+            for prop in properties:
+                prop_id = str(prop.get("id"))
+                status_str = str(prop.get("approval_status") or "").lower()
+                if "approve" not in status_str:
+                    continue
+                    
+                images = prop.get("images", [])
+                target_images = [img for img in images if img.get("tag") != "Common facilities"]
+                if not target_images:
+                    continue
+                    
+                print(f"   ✅ [Approved] ID: {prop_id} ({len(target_images)} images)")
+                
+                # หา Lead เดิม
+                listing_id = None
+                leads_docs = fs.db.collection(fs.collection_name).where(
+                    filter=FieldFilter("api_property_id", "==", prop_id)
+                ).limit(1).get()
+                
+                if leads_docs:
+                    listing_id = leads_docs[0].id
+                    fs.db.collection(fs.collection_name).document(listing_id).update({"launch_approved": True})
+                
+                # บันทึกลงตะกร้า
+                doc_ref = fs.db.collection(TARGET_COLLECTION).document(prop_id)
+                batch.set(doc_ref, {
+                    "property_id": prop_id,
+                    "listing_id": listing_id,
+                    "images": target_images,
+                    "image_count": len(target_images),
+                    "fetch_email": email, # 🚩 ปักธง Email ที่ดึงมา
+                    "updated_at": time.time()
+                }, merge=True)
+                
+                batch_count += 1
+                total_approved += 1
+                total_images += len(target_images)
             
-            if leads_docs:
-                listing_id = leads_docs[0].id
-                # ปักธงใน Lead เดิม (ทำนอก batch เพื่อป้องกัน Batch limitation ข้าม Collection)
-                fs.db.collection(fs.collection_name).document(listing_id).update({
-                    "launch_approved": True
-                })
+            if batch_count > 0:
+                batch.commit()
             
-            # 4. บันทึกลงตะกร้า Launch_Properties ด้วย Batch (ห้ามใส่ analyzed/uploaded เพื่อไม่ให้ทับค่าเก่า)
-            doc_ref = fs.db.collection("Launch_Properties").document(prop_id)
-            batch.set(doc_ref, {
-                "property_id": prop_id,
-                "listing_id": listing_id,
-                "images": target_images,
-                "image_count": len(target_images),
-                "updated_at": time.time()
-            }, merge=True)
+            page += 1
+            time.sleep(0.5) # ป้องกัน Rate limit
             
-            batch_operations_count += 1
-            total_approved += 1
-            total_images += len(target_images)
-            
-        # Commit Batch ของหน้านี้
-        if batch_operations_count > 0:
-            batch.commit()
-            print(f"   💾 บันทึกคิวงานหน้านี้ลง Firestore เรียบร้อยแล้ว ({batch_operations_count} รายการ)")
-            
-        page += 1
-        time.sleep(0.5) # พักเซิร์ฟเวอร์นิดหน่อยก่อนขึ้นหน้าถัดไป
+        except Exception as e:
+            print(f"❌ Error at page {page}: {e}")
+            break
 
-    print(f"\n🎉 ภารกิจสำเร็จ! ดึงข้อมูล Approved มาได้ทั้งหมด {total_approved} รหัสพร็อพเพอร์ตี้ (รวม {total_images} รูป)")
+    print(f"🏁 สำเร็จ! บัญชี {account_name}: ดึงได้ {total_approved} Approved Properties ({total_images} รูป)")
 
 if __name__ == "__main__":
-    fetch_arnon_properties_list()
+    fs = FirestoreService()
+    
+    # 1. รอบ Automation
+    api_auto = APIService()
+    if api_auto.authenticate():
+        fetch_and_save_properties(api_auto, fs, "Automation")
+    
+    # 2. รอบ Arnon
+    api_arnon = APIService()
+    if api_arnon.authenticate(use_arnon=True):
+        fetch_and_save_properties(api_arnon, fs, "Arnon")
