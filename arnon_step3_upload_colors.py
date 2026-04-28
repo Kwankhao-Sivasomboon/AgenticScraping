@@ -111,9 +111,12 @@ def upload_production_sync():
                     "style": lp_data.get("architect_style", "Other"), 
                     "house_color": house_color, "color": dominant_thai,
                     "room_element_breakdown": lp_data.get("room_element_breakdown", {}), 
-                    "area_weight": area_weight
+                    "area_weight": area_weight,
+                    "room_color": room_color_dict,      # 🔥 เพิ่มกลับเข้าไปใน specifications
+                    "furniture_color": furn_color_dict  # 🔥 เพิ่มกลับเข้าไปใน specifications
                 }
             }, timeout=10)
+            print(f"      ✅ Agent API updated")
 
             # --- [SUBMIT STAFF API] ---
             from datetime import datetime, timedelta
@@ -127,7 +130,21 @@ def upload_production_sync():
                 "house_color": house_color, "interior_style": lp_data.get("architect_style", "Other"), 
                 "property_type": lp_data.get("property_type", "house")
             }
-            requests.post(f"{base_url}/api/staff/color-analyses", headers=staff_headers, json=s_payload, timeout=10)
+            
+            while True:
+                res_staff = requests.post(f"{base_url}/api/staff/color-analyses", headers=staff_headers, json=s_payload, timeout=10)
+                if res_staff.status_code in [200, 201]:
+                    print(f"      ✅ Staff API upload success")
+                    break
+                elif res_staff.status_code == 429:
+                    print("      ⚠️ 429 Too Many Requests. Sleeping 5s...")
+                    time.sleep(5)
+                else:
+                    print(f"      ❌ Staff API failed: {res_staff.status_code} - {res_staff.text}")
+                    break
+            
+            # 💤 หน่วงเวลาเพื่อป้องกัน 429
+            time.sleep(1)
 
 if __name__ == "__main__":
     upload_production_sync()
