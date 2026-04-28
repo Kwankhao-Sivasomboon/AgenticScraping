@@ -20,4 +20,4 @@ COPY . /app/
 EXPOSE 8080
 
 # Run FastAPI via Uvicorn Worker
-CMD ["uvicorn", "main_api:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]
+CMD ["uvicorn", "main_api_true_color:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]

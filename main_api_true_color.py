@@ -35,29 +35,12 @@ THAI_COLORS = [
     "เหลืองอ่อน", "น้ำตาลอมเหลือง", "น้ำตาลอ่อน", "ขาว", "เทา", "น้ำเงิน", "ดำ"
 ]
 
-# System Base Colors (14)
-SYSTEM_COLOR_MAP = {
-    "Green": "Green",
-    "Brown": "Brown",
-    "Red": "Red",
-    "Dark Yellow": "Yellow",
-    "Orange": "Orange",
-    "Purple": "Pink",
-    "Pink": "Pink",
-    "Light Yellow": "Cream",
-    "Yellowish Brown": "Cream",
-    "Light Brown": "Cream",
-    "White": "White",
-    "Gray": "Gray",
-    "Blue": "Blue",
-    "Black": "Black"
-}
-
-SYSTEM_THAI_MAP = {
-    "Black": "ดำ", "Blue": "น้ำเงิน", "Brown": "น้ำตาล", "Cream": "ครีม",
-    "Gold": "ทอง", "Gray": "เทา", "Green": "เขียว", "Light Gray": "เทาอ่อน",
-    "Orange": "ส้ม", "Pink": "ชมพู", "Red": "แดง", "Silver": "เงิน",
-    "White": "ขาว", "Yellow": "เหลือง"
+# 14 สีดิบ AI ตรงๆ (No Mapping)
+THAI_COLORS_MAP = {
+    "Green": "เขียว", "Brown": "น้ำตาล", "Red": "แดง", 
+    "Dark Yellow": "เหลืองเข้ม", "Orange": "ส้ม", "Purple": "ม่วง", "Pink": "ชมพู",
+    "Light Yellow": "เหลืองอ่อน", "Yellowish Brown": "น้ำตาลอมเหลือง", "Light Brown": "น้ำตาลอ่อน",
+    "White": "ขาว", "Gray": "เทา", "Blue": "น้ำเงิน", "Black": "ดำ"
 }
 
 # --- Schema ---
@@ -307,13 +290,13 @@ async def process_true_color_analysis(property_id: int):
         room_weight = res.room_weight
         furn_weight = res.furniture_weight
 
-        # Mathematically compute overall room_color_composition
+        # 1. คำนวณ Room Score แบบปกติ (1:1:1:1 ตาม Breakdown) - ลอจิกเดียวกับ Report
         room_comp_floats = []
         for i in range(14):
             val = (
-                (res.structural_colors.wall[i] * res.room_element_breakdown.wall / 100 * 2.0) + # 🔥 เน้นผนัง x 2
+                (res.structural_colors.wall[i] * res.room_element_breakdown.wall / 100) + 
                 (res.structural_colors.floor[i] * res.room_element_breakdown.floor / 100) +
-                (res.structural_colors.ceiling[i] * res.room_element_breakdown.ceiling / 100 * 0.2) + 
+                (res.structural_colors.ceiling[i] * res.room_element_breakdown.ceiling / 100) + 
                 (res.structural_colors.door[i] * res.room_element_breakdown.door / 100)
             )
             room_comp_floats.append(round(val))
@@ -330,19 +313,21 @@ async def process_true_color_analysis(property_id: int):
             for i in range(14)
         ]
         
-        # Aggregate into System Colors
-        system_scores = {c: 0.0 for c in set(SYSTEM_COLOR_MAP.values())}
-        for i in range(14):
-            ai_color = ENGLISH_COLORS[i]
-            sys_color = SYSTEM_COLOR_MAP[ai_color]
-            system_scores[sys_color] += combined_colors[i]
-            
-        sorted_sys_colors = sorted(system_scores.items(), key=lambda x: x[1], reverse=True)
-        house_color = sorted_sys_colors[0][0] if sorted_sys_colors[0][1] > 0 else "Not Specified"
-        house_color_thai = SYSTEM_THAI_MAP.get(house_color, "ไม่ระบุ")
+        # หาผู้ชนะจาก 14 สีตรงๆ (No Mapping)
+        max_score = -1
+        winner_idx = 10 # Default White
+        for i, score in enumerate(combined_colors):
+            if score > max_score:
+                max_score = score
+                winner_idx = i
+                
+        house_color = ENGLISH_COLORS[winner_idx]
+        house_color_thai = THAI_COLORS_MAP.get(house_color, "ขาว")
         
-        house_color2 = sorted_sys_colors[1][0] if len(sorted_sys_colors) > 1 and sorted_sys_colors[1][1] > 0 else None
-        house_color2_thai = SYSTEM_THAI_MAP.get(house_color2) if house_color2 else None
+        # หา Runner up (House Color 2)
+        sorted_scores = sorted(enumerate(combined_colors), key=lambda x: x[1], reverse=True)
+        house_color2 = ENGLISH_COLORS[sorted_scores[1][0]] if len(sorted_scores) > 1 and sorted_scores[1][1] > 0 else None
+        house_color2_thai = THAI_COLORS_MAP.get(house_color2) if house_color2 else None
 
         specs_payload = {
             "style": res.architect_style,
