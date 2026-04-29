@@ -13,7 +13,7 @@ from src.services.api_service import APIService
 load_dotenv()
 BASE_URL = os.getenv('AGENT_API_BASE_URL', 'https://dev.yourhome.co.th/api')
 
-def optimize_image(image_bytes, format_ext, quality=100, max_size=None):
+def optimize_image(image_bytes, format_ext, quality=50, max_size=None):
     img = Image.open(io.BytesIO(image_bytes))
     if img.mode in ("P", "RGBA"): img = img.convert("RGBA")
     elif img.mode != "RGB": img = img.convert("RGB")
