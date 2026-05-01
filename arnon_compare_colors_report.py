@@ -13,10 +13,13 @@ ENGLISH_COLORS = [
 
 def get_dominant_color(room_list, furn_list, room_w, furn_w):
     """คำนวณสีเด่นจาก room และ furniture โดยไม่มีการ Map สี"""
-    if not room_list or len(room_list) < 14:
-        room_list = [0] * 14
-    if not furn_list or len(furn_list) < 14:
-        furn_list = [0] * 14
+    def pad_list(lst):
+        if not lst: return [0] * 14
+        if len(lst) < 14: return list(lst) + [0] * (14 - len(lst))
+        return lst[:14]
+
+    room_list = pad_list(room_list)
+    furn_list = pad_list(furn_list)
 
     scores = {}
     for i in range(14):

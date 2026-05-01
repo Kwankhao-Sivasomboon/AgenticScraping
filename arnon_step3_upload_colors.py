@@ -9,7 +9,7 @@ load_dotenv()
 
 # ⚙️ CONFIGURATION
 SOURCE_COLLECTIONS = ["area_color"] 
-PROJECT_LIMIT = None                  
+PROJECT_LIMIT = None            
 TEST_PROPERTY_ID = None           
 USE_STAGING = False 
 
@@ -37,8 +37,14 @@ def get_dominant_color_logic(room_list, furn_list, room_w, furn_w):
     ลอจิกเดียวกับใน arnon_compare_colors_report.py
     คำนวณสีเด่นจาก room และ furniture โดยไม่มีการ Map สี และไม่มีตัวคูณพิเศษ
     """
-    if not room_list or len(room_list) < 14: room_list = [0] * 14
-    if not furn_list or len(furn_list) < 14: furn_list = [0] * 14
+    # 🛠️ Fix: Pad with zeros instead of resetting to empty
+    def pad_list(lst):
+        if not lst: return [0] * 14
+        if len(lst) < 14: return list(lst) + [0] * (14 - len(lst))
+        return lst[:14]
+
+    room_list = pad_list(room_list)
+    furn_list = pad_list(furn_list)
 
     scores = {}
     for i in range(14):
@@ -51,8 +57,10 @@ def get_dominant_color_logic(room_list, furn_list, room_w, furn_w):
     return dominant
 
 def list_to_color_dict(lst):
-    if not lst or len(lst) < 14: return {color: 0 for color in ENGLISH_COLORS}
-    return {ENGLISH_COLORS[i]: lst[i] for i in range(14)}
+    if not lst: return {color: 0 for color in ENGLISH_COLORS}
+    # 🛠️ Fix: Pad with zeros to handle shorter lists
+    safe_list = list(lst) + [0] * (14 - len(lst))
+    return {ENGLISH_COLORS[i]: safe_list[i] for i in range(14)}
 
 def upload_production_sync():
     fs = FirestoreService()
@@ -74,8 +82,11 @@ def upload_production_sync():
 
     for coll_name in SOURCE_COLLECTIONS:
         print(f"🔍 Scanning {coll_name} for analyzed properties...")
-        query = fs.db.collection(coll_name).where("true_color_analyzed", "==", True)
-        docs = query.get()
+        if TEST_PROPERTY_ID:
+            docs = [fs.db.collection(coll_name).document(str(TEST_PROPERTY_ID)).get()]
+        else:
+            query = fs.db.collection(coll_name).where("true_color_analyzed", "==", True)
+            docs = query.limit(PROJECT_LIMIT).get() if PROJECT_LIMIT else query.get()
 
         for ac_doc in docs:
             prop_id = ac_doc.id
@@ -105,18 +116,31 @@ def upload_production_sync():
 
             # --- [UPDATE AGENT API] ---
             update_url = f"{base_url}/api/agent/properties/{prop_id}/update"
-            requests.post(update_url, headers=agent_headers, json={
-                "house_color": house_color, "color": dominant_thai,
-                "specifications": {
-                    "style": lp_data.get("architect_style", "Other"), 
-                    "house_color": house_color, "color": dominant_thai,
-                    "room_element_breakdown": lp_data.get("room_element_breakdown", {}), 
-                    "area_weight": area_weight,
-                    "room_color": room_color_dict,      # 🔥 เพิ่มกลับเข้าไปใน specifications
-                    "furniture_color": furn_color_dict  # 🔥 เพิ่มกลับเข้าไปใน specifications
-                }
-            }, timeout=10)
-            print(f"      ✅ Agent API updated")
+            while True:
+                try:
+                    res_agent = requests.post(update_url, headers=agent_headers, json={
+                        "house_color": house_color, "color": dominant_thai,
+                        "specifications": {
+                            "style": lp_data.get("architect_style", "Other"), 
+                            "house_color": house_color, "color": dominant_thai,
+                            "room_element_breakdown": lp_data.get("room_element_breakdown", {}), 
+                            "area_weight": area_weight,
+                            "room_color": room_color_dict,
+                            "furniture_color": furn_color_dict
+                        }
+                    }, timeout=15)
+                    if res_agent.status_code in [200, 201]:
+                        print(f"      ✅ Agent API updated")
+                        break
+                    elif res_agent.status_code == 429:
+                        print("      ⚠️ Agent API 429. Sleeping 5s...")
+                        time.sleep(5)
+                    else:
+                        print(f"      ❌ Agent API failed: {res_agent.status_code}")
+                        break
+                except Exception as e:
+                    print(f"      ⚠️ Agent API Error: {e}. Retrying in 5s...")
+                    time.sleep(5)
 
             # --- [SUBMIT STAFF API] ---
             from datetime import datetime, timedelta
@@ -132,16 +156,20 @@ def upload_production_sync():
             }
             
             while True:
-                res_staff = requests.post(f"{base_url}/api/staff/color-analyses", headers=staff_headers, json=s_payload, timeout=10)
-                if res_staff.status_code in [200, 201]:
-                    print(f"      ✅ Staff API upload success")
-                    break
-                elif res_staff.status_code == 429:
-                    print("      ⚠️ 429 Too Many Requests. Sleeping 5s...")
+                try:
+                    res_staff = requests.post(f"{base_url}/api/staff/color-analyses", headers=staff_headers, json=s_payload, timeout=15)
+                    if res_staff.status_code in [200, 201]:
+                        print(f"      ✅ Staff API upload success")
+                        break
+                    elif res_staff.status_code == 429:
+                        print("      ⚠️ Staff API 429. Sleeping 5s...")
+                        time.sleep(5)
+                    else:
+                        print(f"      ❌ Staff API failed: {res_staff.status_code}")
+                        break
+                except Exception as e:
+                    print(f"      ⚠️ Staff API Error: {e}. Retrying in 5s...")
                     time.sleep(5)
-                else:
-                    print(f"      ❌ Staff API failed: {res_staff.status_code} - {res_staff.text}")
-                    break
             
             # 💤 หน่วงเวลาเพื่อป้องกัน 429
             time.sleep(1)

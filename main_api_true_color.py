@@ -291,13 +291,16 @@ async def process_true_color_analysis(property_id: int):
         furn_weight = res.furniture_weight
 
         # 1. คำนวณ Room Score แบบปกติ (1:1:1:1 ตาม Breakdown) - ลอจิกเดียวกับ Report
+        def safe_get(lst, idx):
+            return lst[idx] if lst and idx < len(lst) else 0
+
         room_comp_floats = []
         for i in range(14):
             val = (
-                (res.structural_colors.wall[i] * res.room_element_breakdown.wall / 100) + 
-                (res.structural_colors.floor[i] * res.room_element_breakdown.floor / 100) +
-                (res.structural_colors.ceiling[i] * res.room_element_breakdown.ceiling / 100) + 
-                (res.structural_colors.door[i] * res.room_element_breakdown.door / 100)
+                (safe_get(res.structural_colors.wall, i) * res.room_element_breakdown.wall / 100) + 
+                (safe_get(res.structural_colors.floor, i) * res.room_element_breakdown.floor / 100) +
+                (safe_get(res.structural_colors.ceiling, i) * res.room_element_breakdown.ceiling / 100) + 
+                (safe_get(res.structural_colors.door, i) * res.room_element_breakdown.door / 100)
             )
             room_comp_floats.append(round(val))
             
